@@ -12,5 +12,7 @@ urlpatterns = [
     path("sessions/<uuid:session_id>/plugins/<str:name>/", views.PluginDetailView.as_view()),
     path("sessions/<uuid:session_id>/workflows/", views.WorkflowListView.as_view()),
     path("sessions/<uuid:session_id>/workflows/<str:name>/", views.WorkflowDetailView.as_view()),
+    path("sessions/<uuid:session_id>/eureka-runs/<int:run_id>/", views.EurekaRunView.as_view()),
+    path("eureka/runs/<int:run_id>/stages/<str:stage_key>/logs/", views.WebhookLogView.as_view()),
     path("sessions/<uuid:session_id>/stream/", views.StreamView.as_view()),
 ]

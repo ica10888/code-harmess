@@ -12,16 +12,18 @@ from rest_framework.views import APIView
 
 from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
 
-from . import services, workflows
-from .models import ChatSession, Message
+from . import services, workflow_runtime, workflows
+from .models import ChatSession, Message, StageRun, WorkflowRun
 from .options import Effort, Model
 from .serializers import (
     ChatSessionSerializer,
     MessageSerializer,
     PluginDetailSerializer,
     PluginSerializer,
+    EurekaRunSerializer,
     PluginUpdateSerializer,
     SendMessageSerializer,
+    WebhookLogSerializer,
 )
 
 
@@ -244,3 +246,43 @@ class WorkflowDetailView(APIView):
         except services.PluginError as e:
             return plugin_error(e)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --- eureka 工作流：webhook 接收和进度 ---------------------------------------------------
+
+LOOPBACK = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
+
+
+class WebhookLogView(APIView):
+    """插件通过 webhook 回传一行日志。不靠登录（插件线程没有用户的 cookie），靠两道门：
+    ① 令牌：每次运行一个，只对这一个 run 有效；② 来源：只允许本机。"""
+
+    authentication_classes: list = []
+
+    def post(self, request, run_id, stage_key):
+        from .workflows_run import verify_run_token
+
+        header = request.META.get("HTTP_AUTHORIZATION", "")
+        token = header[7:] if header.startswith("Bearer ") else ""
+        if request.META.get("REMOTE_ADDR") not in LOOPBACK or not verify_run_token(run_id, token):
+            return Response({"detail": "forbidden"}, status=status.HTTP_403_FORBIDDEN)  # 先过门，再谈有没有这个 run
+        serializer = WebhookLogSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not StageRun.objects.filter(run_id=run_id, key=stage_key).exists():
+            raise Http404
+        written = workflow_runtime.write_log_directly(run_id, stage_key, serializer.validated_data["seq"], serializer.validated_data["text"])
+        return Response(status=status.HTTP_201_CREATED if written else status.HTTP_200_OK)  # 重发：已经有了，也算成功
+
+    def get(self, request, run_id, stage_key):
+        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class EurekaRunView(APIView):
+    """某个会话里一次工作流运行的进度：运行状态、每个阶段的状态和日志。只有会话的主人能看。"""
+
+    def get(self, request, session_id, run_id):
+        session = get_own_session(request, session_id)
+        run = WorkflowRun.objects.filter(pk=run_id, eureka__message__session=session).prefetch_related("stages__logs").first()
+        if run is None:
+            raise Http404
+        return Response(EurekaRunSerializer(run).data)

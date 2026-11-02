@@ -23,7 +23,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "rest_framework",
     "corsheaders",
-    "apps",
+    "apps.apps.AppsConfig",
 ]
 
 MIDDLEWARE = [
@@ -43,6 +43,7 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {"timeout": 20},  # 遇到锁先等最多 20 秒，不立刻报 database is locked（WAL 在 apps.ready 里设置）
     }
 }
 
@@ -72,6 +73,13 @@ HARNESS_DEFAULT_SKILLS_DIR = str((BASE_DIR / _default_skills).resolve()) if _def
 # 默认工作流目录：规则同默认插件（读自 config.ini 的 [storage] default_workflow_dir）
 _default_workflow = config.get("storage", "default_workflow_dir", fallback="").strip()
 HARNESS_DEFAULT_WORKFLOW_DIR = str((BASE_DIR / _default_workflow).resolve()) if _default_workflow else ""
+# eureka 时刻的提示文本（读自 config.ini 的 [eureka] text）；留空时用 apps.workflows.DEFAULT_EUREKA_TEXT
+EUREKA_TEXT = config.get("eureka", "text", fallback="").strip()
+# eureka 之后展开工作流的插件（backend/eureka/plugins/<目录名>/，逗号分隔）；留空表示不展开任何工作流
+EUREKA_PLUGINS = config.get("eureka", "plugins", fallback="").strip()
+EUREKA_STAGE_TIMEOUT = config.getfloat("eureka", "stage_timeout_seconds", fallback=60.0)  # 单个阶段的超时（秒）
+EUREKA_WEBHOOK_BASE_URL = config.get("eureka", "webhook_base_url", fallback="http://127.0.0.1:8000").strip()
+EUREKA_MAX_LOG_LINES = 500  # 单个阶段最多保留的日志行数（和 eureka.webhook 的发送端上限一致）
 # 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
 HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024
 

@@ -2,6 +2,8 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
+import EurekaBanner from '../components/EurekaBanner.vue'
+import EurekaRunPanel from '../components/EurekaRunPanel.vue'
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ModelPicker from '../components/ModelPicker.vue'
@@ -183,6 +185,16 @@ onBeforeUnmount(() => closeStream && closeStream())
         <div v-if="!messages.length" class="empty">发送第一条消息，开始对话</div>
         <div v-for="m in messages" :key="m.id" class="row" :class="m.role">
           <div class="bubble">{{ m.content }}</div>
+          <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
+          <EurekaBanner v-if="m.eureka" :text="m.eureka.text" />
+          <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->
+          <EurekaRunPanel
+            v-if="m.eureka?.run && currentId"
+            :key="`${currentId}-${m.eureka.run.id}`"
+            :session-id="currentId"
+            :run-id="m.eureka.run.id"
+            :initial-status="m.eureka.run.status"
+          />
         </div>
       </div>
 
@@ -312,10 +324,12 @@ onBeforeUnmount(() => closeStream && closeStream())
 }
 .row {
   display: flex;
+  flex-direction: column; /* 气泡在上，eureka 提示条（如果有）在下 */
+  align-items: flex-start;
   margin-bottom: 16px;
 }
 .row.user {
-  justify-content: flex-end;
+  align-items: flex-end;
 }
 .bubble {
   max-width: 70%;

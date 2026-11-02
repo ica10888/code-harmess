@@ -98,3 +98,8 @@ export const setWorkflowEnabled = (sessionId, name, enabled) =>
   http.patch(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
 export const deleteWorkflow = (sessionId, name) =>
   http.delete(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`)
+
+// --- eureka 工作流进度 ---
+/** 某个会话里一次工作流运行的进度：{ id, plugin, status, error, stages: [{ key, title, status, error, logs }] }。 */
+export const getEurekaRun = (sessionId, runId) =>
+  http.get(`/sessions/${sessionId}/eureka-runs/${runId}/`).then((r) => r.data)

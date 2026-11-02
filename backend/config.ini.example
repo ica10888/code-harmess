@@ -37,3 +37,20 @@ default_skills_dir = default_skills
 default_workflow_dir = default_workflow
 ; 单个上传文件的大小上限，单位 MB；普通上传和插件上传共用这一个上限
 max_upload_mb = 20
+
+[eureka]
+; eureka 时刻：当前会话用了某个插件，并且工作流里有 name 相同的文件，而且模型这一轮的回复通过了那个工作流的 schema 校验，
+; 就在这条回复下面多显示一条提示，文本就是下面这一行。
+;   - 只是提示：它不会进模型的上下文（保存在单独的数据库表里，刷新页面后仍然在）。
+;   - 以后会在这里接入新的实现；现在只负责判定、保存和展示。
+;   - 一行文本，支持 emoji；留空则使用内置的默认文本。改完重启后端生效，已经出现过的提示保持当时的文字不变。
+text = 🎉✨ Eureka 时刻！🚀 这一步已通过工作流校验，成果就绪 💡
+;
+; --- eureka 之后展开的工作流（插件机制，见 AGENTS.md「eureka 插件机制」）---
+; 要展开工作流的插件，对应 backend/eureka/plugins/<目录名>/，逗号分隔；留空表示不展开任何工作流（只显示上面的提示）。
+; 目录名是 Python 包名（小写字母、下划线）；插件的 name（如 code-review）要和工作流 frontmatter 的 name 一致。
+plugins = code_review, analyze_config
+; 单个阶段的超时，单位秒。超时只是标记失败并放弃等待（Python 不能安全地杀线程）。
+stage_timeout_seconds = 60
+; 插件通过 webhook 把「打印文字」发回主项目用的地址（必须能访问到本后端；接收接口只允许本机来源）。
+webhook_base_url = http://127.0.0.1:8000

@@ -7,7 +7,7 @@
 
 - **落点**：DeepSeek 线上格式只写在 `backend/core/src/providers.py`，必须保持可替换；`tools.py` 不知道任何模型 API 格式，`agent.py` 只依赖 provider 的统一接口。
 - **范围**：只做最小闭环。不实现审批策略、权限限制、工具沙箱及 MCP（见 `rule/harness.md`）。
-- **依赖**：运行时依赖只有 `openai`、`rich`、`prompt_toolkit`，未经询问不得新增。
+- **依赖**：运行时依赖只有 `openai`、`rich`、`prompt_toolkit`、`jsonschema`，未经询问不得新增。
 - **验证**：先写测试并看它失败，再实现；测试用 `FakeProvider`、`FakeOpenAI`、`tmp_path`，绝不调用真实 API。真实 API 检查写成 `@pytest.mark.live` 测试，不写一次性脚本。
 - **不要运行 agent 本身**来验证改动，它会调用付费 API 并等待交互输入。
 - **既有约定仍然成立**：每个 `call_id` 恰好一条结果，失败也要回传错误；工具失败不能让循环崩溃；修剪只替换旧工具结果的内容、不删消息，且批量进行以保护前缀缓存。

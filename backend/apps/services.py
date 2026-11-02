@@ -1,6 +1,7 @@
 """业务层：视图只管 HTTP，真正的逻辑放这里。"""
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -10,7 +11,7 @@ from django.conf import settings
 from skills import load_skill_file  # core：能不能当 skill，以它的判断为准
 
 from . import harness
-from .models import ChatSession, Message
+from .models import ChatSession, Eureka, Message
 from .serializers import MessageSerializer
 
 
@@ -52,6 +53,46 @@ def name_session_from_first_message(session: ChatSession, user_text: str) -> str
     return title
 
 
+def used_plugin_names(session: ChatSession) -> list[str]:
+    """这个会话里正在用的插件的 frontmatter name：已勾选、并且 core 读得了的。
+
+    注入过的插件全文会一直留在对话里，所以只要还勾着，后面每一轮都算在用。读不了的（文件被删、格式坏了）不算。
+    """
+    names = []
+    for path in checked_plugin_paths(session):
+        try:
+            names.append(load_skill_file(path).name)
+        except (OSError, ValueError):
+            continue
+    return names
+
+
+def save_assistant_message(session: ChatSession, reply: str) -> Message:
+    """存下模型的回复；如果这一轮是 eureka 时刻，同时存一条 Eureka（单独的表，不进上下文）。
+
+    判定出任何问题都只是「没有 eureka」，绝不影响回复本身。
+    """
+    message = Message.objects.create(session=session, role="assistant", content=reply)
+    try:
+        from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
+
+        hit = workflows.match_eureka(session, used_plugin_names(session), reply)
+        if hit:
+            eureka = Eureka.objects.create(
+                message=message, plugin=hit["plugin"], workflow=hit["workflow"], text=workflows.eureka_text()
+            )
+            try:
+                from . import workflow_runtime
+
+                # 展开工作流：只创建运行记录并入队就返回，不在聊天请求里执行；失败只是没有工作流，不影响提示和回复
+                workflow_runtime.start_run(eureka, hit["payload"])
+            except Exception:
+                logging.getLogger(__name__).exception("展开 eureka 工作流失败，已忽略")
+    except Exception:
+        logging.getLogger(__name__).exception("eureka 判定失败，已忽略")
+    return Message.objects.get(pk=message.pk)  # 重新取一次：让 message.eureka 能读到刚存的那条
+
+
 def send_user_message(
     session: ChatSession, user_text: str, model: str | None = None, effort: str | None = None
 ) -> list[Message]:
@@ -60,7 +101,7 @@ def send_user_message(
     user_message = Message.objects.create(session=session, role="user", content=user_text)
     # 通过模块属性调用，测试里才能替换 generate_reply
     reply = generate_reply(session, user_text, model, effort)
-    assistant_message = Message.objects.create(session=session, role="assistant", content=reply)
+    assistant_message = save_assistant_message(session, reply)
     return [user_message, assistant_message]
 
 
@@ -85,7 +126,7 @@ def stream_user_message(session: ChatSession, user_text: str, model: str | None 
                 reply = data
     except Exception as e:
         reply = f"调用模型失败：{e}"
-    yield "done", MessageSerializer(Message.objects.create(session=session, role="assistant", content=reply)).data
+    yield "done", MessageSerializer(save_assistant_message(session, reply)).data
 
 
 class UploadError(Exception):
