@@ -1,7 +1,9 @@
 # 项目说明
 
+@rule/deepseek-responses.md
+
 一个 Harness 的最小实践
-包含一个前后架构，前端 Vue 3 + Element Plus，后端 Django 4.2 
+包含一个前后架构，前端 Vue 3 + Element Plus，后端 Django 4.2 ，SQLite
 core 实现一个最小 Harness ，然后通过后端方法调用
 
 清晰优先于功能：改动要小，要易读。
@@ -11,6 +13,10 @@ core 实现一个最小 Harness ，然后通过后端方法调用
 
 ```
 code-harness/
+├── rule/             # 项目规则
+│   ├── harness.md             # 最小 Harness 实现规则（由 commands 按需引用）
+│   ├── deepseek-responses.md  # DeepSeek Responses API 开发规则
+│   └── commands/     # 斜杠命令源文件；.claude/commands 是指向它的 junction
 ├── backend/          # Django 后端（端口 8000）
 │   ├── config.ini    # 数据库及服务器配置（勿提交密码）
 │   ├── manage.py
