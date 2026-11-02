@@ -39,12 +39,12 @@ def get_provider():
     return _provider
 
 
-def _web_role(can_edit: bool):
+def _web_role(can_edit: bool, model: str | None = None):
     """网页聊天里的角色说明。要写明真实模型：core 的默认提示词是「coding agent」，
     模型拿它自我介绍时会自称 Claude；说清楚它是谁，它才不会冒充别家。"""
     role = (
         "You are a coding assistant inside a web chat page. The user types in a text box and reads your replies there.\n"
-        f"You are powered by DeepSeek (model: {settings.DEEPSEEK_MODEL}). If asked what model you are or who made you, "
+        f"You are powered by DeepSeek (model: {model or settings.DEEPSEEK_MODEL}). If asked what model you are or who made you, "
         "say so; never claim to be Claude, GPT or any other model.\n"
         "Your tools work inside a private workspace folder that belongs to this conversation. "
         "Always use paths relative to the workspace (e.g. `notes/a.txt`, never absolute paths or `..`)."
@@ -59,7 +59,7 @@ def workspace_dir(session) -> str:
     return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "file")
 
 
-def _agent(session) -> Agent:
+def _agent(session, model: str | None = None) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 
     读写文件的工具被限制在这个会话自己的工作区里（tools.workspace_tools），模型碰不到别的会话和项目文件。
@@ -73,7 +73,7 @@ def _agent(session) -> Agent:
             working_directory="workspace",
             tool_names=[t.name for t in allowed],
             today=datetime.now().astimezone().date().isoformat(),
-            persona=_web_role(can_edit=any(t.name == "edit_file" for t in allowed)),
+            persona=_web_role(can_edit=any(t.name == "edit_file" for t in allowed), model=model),
         )
     )
     agent = Agent(
@@ -98,16 +98,16 @@ def _finish(session, agent: Agent, answer) -> str:
     return "\n\n".join(texts) or EMPTY_REPLY
 
 
-def run_turn(session, user_text: str) -> str:
-    """处理用户的一句话，返回要展示给用户的回复。
+def run_turn(session, user_text: str, model: str | None = None, effort: str | None = None) -> str:
+    """处理用户的一句话，返回要展示给用户的回复。model / effort 是本次请求选的模型和推理强度，不给就用默认。
 
     Agent.respond 在副本上推进对话，整轮成功才写回；中途抛异常时对话原样不动，所以这里也只在成功后才保存。
     """
-    agent = _agent(session)
-    return _finish(session, agent, agent.respond(user_text))
+    agent = _agent(session, model)
+    return _finish(session, agent, agent.respond(user_text, model=model, effort=effort))
 
 
-def stream_turn(session, user_text: str):
+def stream_turn(session, user_text: str, model: str | None = None, effort: str | None = None):
     """和 run_turn 一样处理一句话，但边生成边吐：依次产出 ("delta", 一段文字) …… 最后产出 ("done", 完整回复)。
 
     Agent.respond 是同步的，所以放在一个线程里跑，文字片段经队列交给这个生成器。
@@ -116,11 +116,13 @@ def stream_turn(session, user_text: str):
     """
     pieces: queue.Queue = queue.Queue()
     outcome: dict = {}
-    agent = _agent(session)
+    agent = _agent(session, model)
 
     def work():
         try:
-            outcome["answer"] = agent.respond(user_text, on_text=lambda t: pieces.put(("delta", t)))
+            outcome["answer"] = agent.respond(
+                user_text, on_text=lambda t: pieces.put(("delta", t)), model=model, effort=effort
+            )
         except Exception as e:  # 交给生成器所在的线程去抛
             outcome["error"] = e
         finally:

@@ -60,7 +60,7 @@ CORS_ALLOWED_ORIGINS = config.get("cors", "allowed_origins").split(",")
 CORS_ALLOW_CREDENTIALS = True
 
 DEEPSEEK_API_KEY = config.get("deepseek", "api_key", fallback="")
-DEEPSEEK_MODEL = config.get("deepseek", "model", fallback="deepseek-v4-flash")
+DEEPSEEK_MODEL = config.get("deepseek", "model", fallback="deepseek-flash")
 DEEPSEEK_BASE_URL = config.get("deepseek", "base_url", fallback="https://api.deepseek.com")
 
 # 存储路径：每个会话的文件放在 <HARNESS_STORAGE_DIR>/input/<会话id>/file/（读自 config.ini 的 [storage]）

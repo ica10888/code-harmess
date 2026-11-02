@@ -12,8 +12,8 @@ allowed_origins = http://localhost:5173,http://127.0.0.1:5173
 [deepseek]
 ; 必填：https://platform.deepseek.com
 api_key = sk-your-key-here
-; 可选：默认 deepseek-v4-flash，可换 deepseek-v4-pro
-model = deepseek-v4-flash
+; 可选：默认 deepseek-flash，可换 deepseek-v4-pro
+model = deepseek-flash
 ; 可选：一般不用改
 base_url = https://api.deepseek.com
 

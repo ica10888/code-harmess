@@ -3,14 +3,18 @@
 import json
 import time
 
+from django.conf import settings
 from django.http import Http404, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
+
 from . import services
 from .models import ChatSession, Message
+from .options import Effort, Model
 from .serializers import ChatSessionSerializer, MessageSerializer, SendMessageSerializer
 
 
@@ -44,7 +48,8 @@ class MessageListView(APIView):
         session = get_own_session(request, session_id)
         serializer = SendMessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        messages = services.send_user_message(session, serializer.validated_data["content"])
+        data = serializer.validated_data
+        messages = services.send_user_message(session, data["content"], data.get("model"), data.get("effort"))
         return Response(MessageSerializer(messages, many=True).data, status=status.HTTP_201_CREATED)
 
 
@@ -59,7 +64,8 @@ class StreamMessageView(APIView):
         session = get_own_session(request, session_id)
         serializer = SendMessageSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        events = services.stream_user_message(session, serializer.validated_data["content"])
+        data = serializer.validated_data
+        events = services.stream_user_message(session, data["content"], data.get("model"), data.get("effort"))
         response = StreamingHttpResponse((sse_frame(e, d) for e, d in events), content_type="text/event-stream")
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
@@ -110,3 +116,20 @@ class FileUploadView(APIView):
             return Response(services.save_upload(session, uploaded), status=status.HTTP_201_CREATED)
         except services.UploadError as e:
             return Response({"detail": str(e)}, status=e.status)
+
+
+class OptionsView(APIView):
+    """可选的模型和推理强度（写死的枚举，见 options.py）。不需要会话，页面一打开就拉一次。"""
+
+    def get(self, request):
+        def pack(enum):
+            return [{"value": c.value, "label": c.label, "hint": c.hint} for c in enum]
+
+        return Response(
+            {
+                "models": pack(Model),
+                "efforts": pack(Effort),  # 按从弱到强排列，滑块直接用这个顺序
+                "default_model": settings.DEEPSEEK_MODEL,
+                "default_effort": DEFAULT_EFFORT,
+            }
+        )

@@ -455,12 +455,19 @@ class Agent:
                 continue
             need_user_input = False  # 有工具调用 → 不等用户，直接再问模型
 
-    def _ask_model(self, conversation: list[dict], on_text: Callable[[str], None] | None = None) -> Reply:
+    def _ask_model(
+        self,
+        conversation: list[dict],
+        on_text: Callable[[str], None] | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> Reply:
         """问一次模型（run 和 respond 共用）：记下输入 token，超预算就批量修剪旧工具结果。
 
-        on_text 只在要流式时才传给 provider：不认识这个参数的 provider（比如测试里的 fake）照常能用。
+        on_text / model / effort 只在有值时才传给 provider：不认识这些参数的 provider（比如测试里的 fake）照常能用。
         """
-        extra = {"on_text": on_text} if on_text else {}
+        optional = {"on_text": on_text, "model": model, "effort": effort}
+        extra = {k: v for k, v in optional.items() if v}
         reply = self.provider.chat(conversation, list(self.tools.values()), self.system, **extra)
         if reply.usage:
             self._log_usage(reply.usage)
@@ -491,7 +498,13 @@ class Agent:
 
         return emit
 
-    def respond(self, user_input: str, on_text: Callable[[str], None] | None = None) -> Answer:
+    def respond(
+        self,
+        user_input: str,
+        on_text: Callable[[str], None] | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> Answer:
         """没有终端的一问一答（后端用）：处理一句用户的话，返回模型说的文字。
 
         和 run() 是同一套一轮逻辑（问模型 → 执行工具 → 回灌，直到没有工具调用或到轮数上限），
@@ -500,12 +513,14 @@ class Agent:
 
         on_text 不为 None 时流式：模型每吐一段文字就调用一次，不用等整句说完。
         多轮（中间调了工具）的文字之间会补一个 "\\n\\n"，所以把所有片段拼起来，就等于 "\\n\\n".join(answer.texts)。
+
+        model / effort：这一句话用哪个模型、多强的推理；不给就用 provider 自己的默认。工具循环的每一轮都用同一组。
         """
         conversation = [*self.current.conversation, {"role": "user", "content": user_input}]
         texts: list[str] = []
         for _ in range(self.max_tool_rounds):
             round_on_text = self._with_separator(on_text, needs_separator=bool(texts)) if on_text else None
-            reply = self._ask_model(conversation, round_on_text)
+            reply = self._ask_model(conversation, round_on_text, model, effort)
             texts.extend(reply.texts)
             if not reply.tool_calls:
                 self.current.conversation[:] = conversation

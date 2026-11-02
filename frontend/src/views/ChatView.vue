@@ -4,6 +4,8 @@ import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
+import ModelPicker from '../components/ModelPicker.vue'
+import { buildSendOptions } from '../utils/options'
 import { sendWithAttachment } from '../utils/sendFlow'
 import { createTypewriter } from '../utils/typewriter'
 import { formatSize, uploadErrorMessage } from '../utils/upload'
@@ -14,6 +16,7 @@ const messages = ref([])
 const draft = ref('')
 const pendingFile = ref(null) // 已选好、还没上传的文件；点「发送」时才上传
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
+const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
 const listEl = ref(null)
 
@@ -56,6 +59,7 @@ async function newSession() {
 async function send() {
   const content = draft.value.trim()
   const attachment = pendingFile.value
+  const options = buildSendOptions(modelChoice.value) // 点发送这一刻的选择，随这句话一起透传给后端
   // 有文件时，没有文字也能发（只上传）；两样都没有就不动
   if ((!content && !attachment) || !currentId.value || sending.value) return
   sending.value = true
@@ -70,7 +74,7 @@ async function send() {
       },
       send: (text) => {
         stage.value = ''
-        return streamReply(text)
+        return streamReply(text, options)
       },
     })
     if (uploaded) {
@@ -95,7 +99,7 @@ async function send() {
 }
 
 // 发送文本并把回复一段段显示出来。出错时往外抛，由 send() 统一提示；这里负责清理半截的临时消息。
-async function streamReply(content) {
+async function streamReply(content, options) {
   // 正在长出来的回复：先用一条临时消息（id 取 Infinity，排在最后），done 到来时换成存好的真消息。
   // live 必须是 messages.value 里取回的响应式代理：改 push 之前的原对象，Vue 看不到，界面不会刷新。
   let live = null
@@ -110,24 +114,29 @@ async function streamReply(content) {
     live = null
   }
   try {
-    await streamMessage(currentId.value, content, {
-      user: (m) => {
-        addMessages([m])
-        scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
+    await streamMessage(
+      currentId.value,
+      content,
+      {
+        user: (m) => {
+          addMessages([m])
+          scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
+        },
+        delta: ({ text }) => {
+          if (!live) {
+            messages.value.push({ id: Infinity, role: 'assistant', content: '' })
+            live = messages.value[messages.value.length - 1]
+          }
+          typewriter.push(text)
+        },
+        done: (m) => {
+          typewriter.finish() // 没打完的立刻补齐，再换成存好的真消息
+          dropLive()
+          addMessages([m])
+        },
       },
-      delta: ({ text }) => {
-        if (!live) {
-          messages.value.push({ id: Infinity, role: 'assistant', content: '' })
-          live = messages.value[messages.value.length - 1]
-        }
-        typewriter.push(text)
-      },
-      done: (m) => {
-        typewriter.finish() // 没打完的立刻补齐，再换成存好的真消息
-        dropLive()
-        addMessages([m])
-      },
-    })
+      options, // { model, effort }：原样透传给后端
+    )
   } catch (e) {
     dropLive() // 流中途断了：去掉半截的临时消息；已存的消息以服务器为准，刷新就能看到
     throw e
@@ -176,17 +185,20 @@ onBeforeUnmount(() => closeStream && closeStream())
           placeholder="支持 Markdown，Ctrl+Enter 发送"
           @keydown.ctrl.enter.prevent="send"
         />
-        <!-- 文本框下方一排：左边选文件，右边发送；两个按钮同高，左右两端对齐 -->
+        <!-- 文本框下方一排：左边选文件；右边依次是模型、推理强度、发送，三者垂直居中对齐 -->
         <div class="actions">
           <FileUploadButton v-model="pendingFile" :disabled="sending" />
-          <el-button
-            type="primary"
-            :loading="sending"
-            :disabled="!draft.trim() && !pendingFile"
-            @click="send"
-          >
-            {{ stage || '发送' }}
-          </el-button>
+          <div class="right">
+            <ModelPicker v-model="modelChoice" :disabled="sending" />
+            <el-button
+              type="primary"
+              :loading="sending"
+              :disabled="!draft.trim() && !pendingFile"
+              @click="send"
+            >
+              {{ stage || '发送' }}
+            </el-button>
+          </div>
         </div>
       </div>
     </main>
@@ -272,10 +284,17 @@ onBeforeUnmount(() => closeStream && closeStream())
   padding: 16px 20px;
   border-top: 1px solid #e4e7ed;
 }
-/* 按钮一排：左边上传、右边发送，垂直居中，所以两个同高的按钮上下对齐 */
+/* 按钮一排：左边选文件；右边是模型、强度、发送。整排垂直居中，所以高度不同的控件也上下对齐 */
 .composer .actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
+}
+.composer .actions .right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
 }
 </style>

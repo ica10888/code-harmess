@@ -7,8 +7,11 @@ export const listSessions = () => http.get('/sessions/').then((r) => r.data)
 export const createSession = (title = '') => http.post('/sessions/', { title }).then((r) => r.data)
 export const listMessages = (sessionId, after = 0) =>
   http.get(`/sessions/${sessionId}/messages/`, { params: { after } }).then((r) => r.data)
-export const sendMessage = (sessionId, content) =>
-  http.post(`/sessions/${sessionId}/messages/`, { content }).then((r) => r.data)
+export const sendMessage = (sessionId, content, options = {}) =>
+  http.post(`/sessions/${sessionId}/messages/`, { content, ...options }).then((r) => r.data)
+
+/** 可选的模型和推理强度（后端写死的枚举）：{ models, efforts, default_model, default_effort }。 */
+export const getOptions = () => http.get('/options/').then((r) => r.data)
 
 /**
  * 订阅后端推送（SSE）。每收到一条消息就调用 onMessage(message)。
@@ -24,13 +27,15 @@ export function openStream(sessionId, afterId, onMessage) {
  * 发一句话，回复边生成边回来（POST + SSE，所以不能用 EventSource，改用 fetch 读流）。
  * 事件：user（存好的用户消息）→ delta（一段文字 {text}）… → done（存好的完整回复）。
  * handlers = { user, delta, done }，各是 (data) => void。失败时抛异常（网络、4xx/5xx）。
+ * options = { model, effort }，都可选，不给就用后端默认。
  */
-export async function streamMessage(sessionId, content, handlers) {
+export async function streamMessage(sessionId, content, handlers, options = {}) {
   const res = await fetch(`/api/sessions/${sessionId}/messages/stream/`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content }),
+    // options = { model, effort }：这一句话用哪个模型、多强的推理，原样透传给后端（见 utils/options.js 的 buildSendOptions）
+    body: JSON.stringify({ content, ...options }),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 

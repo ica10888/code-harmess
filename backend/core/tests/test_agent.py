@@ -710,7 +710,7 @@ def test_respond_without_on_text_still_works_with_providers_that_do_not_know_it(
 def test_respond_stream_adds_one_separator_even_when_middle_rounds_say_nothing(tmp_path):
     f = tmp_path / "s.txt"
     f.write_text("x")
-    tool = lambda i: Reply(tool_calls=[ToolCall(f"c{i}", "read_file", {"path": str(f)})])  # noqa: E731
+    tool = lambda i: Reply(tool_calls=[ToolCall(f"c{i}", "read_file", {"path": str(f)})])
     provider = StreamingProvider([Reply(texts=["look"], tool_calls=tool(0).tool_calls), tool(1), tool(2), Reply(texts=["done"])])
     pieces: list[str] = []
 
@@ -730,3 +730,49 @@ def test_respond_stream_adds_no_separator_before_the_first_text(tmp_path):
     Agent(provider, [read_file], scripted()).respond("go", on_text=pieces.append)
 
     assert "".join(pieces) == "only"  # 前面一轮没说话，开头不能有空行
+
+
+# --- respond 的 model / effort：每次请求可以换，透传给 provider ----------------------------
+
+
+class OptionsProvider(FakeProvider):
+    """记录 chat 收到的 model / effort；和 StreamingProvider 一样，不认识这两个参数的 fake 不受影响。"""
+
+    def __init__(self, replies):
+        super().__init__(replies)
+        self.options: list[dict] = []
+
+    def chat(self, conversation, tools, system="", on_text=None, model=None, effort=None):
+        self.options.append({"model": model, "effort": effort})
+        return super().chat(conversation, tools, system)
+
+
+def test_respond_passes_model_and_effort_to_the_provider_on_every_round(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("x")
+    provider = OptionsProvider(
+        [Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(f)})]), Reply(texts=["done"])]
+    )
+
+    Agent(provider, [read_file], scripted()).respond("go", model="deepseek-v4-pro", effort="max")
+
+    assert provider.options == [{"model": "deepseek-v4-pro", "effort": "max"}] * 2  # 工具循环的每一轮都用同一组
+
+
+def test_respond_without_model_and_effort_leaves_the_provider_defaults_alone():
+    provider = OptionsProvider([Reply(texts=["ok"])])
+
+    Agent(provider, [], scripted()).respond("go")
+
+    assert provider.options == [{"model": None, "effort": None}]
+
+
+def test_respond_does_not_pass_model_or_effort_to_providers_that_do_not_know_them():
+    # FakeProvider.chat 没有 model / effort 参数：没人指定时，Agent 不能把它们传过去
+    assert Agent(FakeProvider([Reply(texts=["ok"])]), [], scripted()).respond("go").texts == ["ok"]
+
+
+def test_run_terminal_loop_is_unaffected_by_model_and_effort():
+    provider = OptionsProvider([Reply(texts=["hi"])])
+    Agent(provider, [], scripted("hello")).run()
+    assert provider.options == [{"model": None, "effort": None}]

@@ -99,6 +99,7 @@ git push
 - 前端 vite 已配置 `/api` 代理到 `http://127.0.0.1:8000`，后端必须先启动
 - 不要运行 `npm run dev` 等长期进程作为后台任务，告知用户手动执行
 - 修改 models 后必须重新执行 `makemigrations` + `migrate`
+- WebFetch 使用代理 http://127.0.0.1:7890
 
 
 

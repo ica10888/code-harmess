@@ -16,28 +16,30 @@ def owner_key_of(request):
     return request.session.session_key
 
 
-def generate_reply(session: ChatSession, user_text: str) -> str:
+def generate_reply(session: ChatSession, user_text: str, model: str | None = None, effort: str | None = None) -> str:
     """根据用户的话生成后端回复：交给 backend/core 的 Harness（见 harness.run_turn）。
 
     调用模型可能失败（没配 key、网络、额度……）：这时把原因当作回复展示给用户，
     不让接口返回 500；这一轮不会进对话，重发即可。
     """
     try:
-        return harness.run_turn(session, user_text)
+        return harness.run_turn(session, user_text, model, effort)
     except Exception as e:
         return f"调用模型失败：{e}"
 
 
-def send_user_message(session: ChatSession, user_text: str) -> list[Message]:
+def send_user_message(
+    session: ChatSession, user_text: str, model: str | None = None, effort: str | None = None
+) -> list[Message]:
     """存下用户消息，调用 generate_reply，再存下回复；返回这两条消息。"""
     user_message = Message.objects.create(session=session, role="user", content=user_text)
     # 通过模块属性调用，测试里才能替换 generate_reply
-    reply = generate_reply(session, user_text)
+    reply = generate_reply(session, user_text, model, effort)
     assistant_message = Message.objects.create(session=session, role="assistant", content=reply)
     return [user_message, assistant_message]
 
 
-def stream_user_message(session: ChatSession, user_text: str):
+def stream_user_message(session: ChatSession, user_text: str, model: str | None = None, effort: str | None = None):
     """send_user_message 的流式版：依次产出 (事件名, 数据)。
 
     user    存好的用户消息（前端用它替换自己先显示的那条）
@@ -47,7 +49,7 @@ def stream_user_message(session: ChatSession, user_text: str):
     """
     yield "user", MessageSerializer(Message.objects.create(session=session, role="user", content=user_text)).data
     try:
-        for kind, data in harness.stream_turn(session, user_text):
+        for kind, data in harness.stream_turn(session, user_text, model, effort):
             if kind == "delta":
                 yield "delta", {"text": data}
             else:
