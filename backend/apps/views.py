@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 
 from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
 
-from . import services
+from . import services, workflows
 from .models import ChatSession, Message
 from .options import Effort, Model
 from .serializers import (
@@ -191,6 +191,56 @@ class PluginDetailView(APIView):
         session = get_own_session(request, session_id)
         try:
             services.delete_plugin(session, name)
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class WorkflowListView(APIView):
+    """GET 列出这个会话的工作流；POST 上传一个 .md 文件新增工作流（表单字段 file）。返回格式和插件一样。"""
+
+    parser_classes = [MultiPartParser]
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        return Response(PluginSerializer(workflows.list_workflows(session), many=True).data)
+
+    def post(self, request, session_id):
+        session = get_own_session(request, session_id)
+        uploaded = request.FILES.get("file")
+        if uploaded is None:
+            return Response({"detail": "请选择一个 .md 文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            workflow = workflows.create_workflow(session, uploaded)
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(PluginSerializer(workflow).data, status=status.HTTP_201_CREATED)
+
+
+class WorkflowDetailView(APIView):
+    """GET 看详情（带文件全文）；PATCH 改勾选状态；DELETE 删除。<name> 就是工作流的文件名（如 flow.md）。"""
+
+    def get(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        try:
+            return Response(PluginDetailSerializer(workflows.get_workflow(session, name)).data)
+        except services.PluginError as e:
+            return plugin_error(e)
+
+    def patch(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        serializer = PluginUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            workflow = workflows.set_workflow_enabled(session, name, serializer.validated_data["enabled"])
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(PluginSerializer(workflow).data)
+
+    def delete(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        try:
+            workflows.delete_workflow(session, name)
         except services.PluginError as e:
             return plugin_error(e)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -21,8 +21,19 @@ base_url = https://api.deepseek.com
 ; 存储根目录：所有会话产生的文件都放在这里。相对路径按 backend/ 解析。目录结构：
 ;   <dir>/input/<会话id>/file/               用户上传的文件，以及模型用文件工具读写的文件
 ;   <dir>/input/<会话id>/skills/<文件名>.md   这个会话的插件：任何 .md 文件都可以，原样保存，文件名就是插件名
-;   <dir>/input/<会话id>/skills/state.json   哪些插件被勾选，形如 {"<文件名>.md": true}
+;   <dir>/input/<会话id>/skills/state.json   这个会话里哪些插件被勾选，形如 {"<文件名>.md": true}
+;   <dir>/input/<会话id>/workflow/<文件名>.md   这个会话的工作流：任何 .md 文件都可以，原样保存，文件名就是工作流名
+;   <dir>/input/<会话id>/workflow/state.json   这个会话里哪些工作流被勾选，形如 {"<文件名>.md": true}
 ; 目录都是第一次用到时才创建；整个存储根目录已在 .gitignore，不会进仓库。
 dir = storage
+; 默认插件目录：里面的 .md 文件是「默认插件」，所有会话都能看到、不能删除（删除返回 403）。
+;   - 只读：不会被复制进会话目录，也不会被改动；往目录里放 / 拿走 .md 文件，刷新页面就生效，不用重启。
+;   - 是否勾选仍然各会话各自记在自己的 state.json 里，互不影响。
+;   - 会话里上传同名文件会被拒绝（409），默认插件始终只有一份。
+;   - 相对路径按 backend/ 解析；留空表示没有默认插件；目录不存在也不报错，只是没有默认插件。
+default_skills_dir = default_skills
+; 默认工作流目录：规则和默认插件完全一样（所有会话可见、只读、不能删除、同名上传返回 409）。
+;   工作流本身现阶段还没有实现：这里只管存放、勾选和删除。留空表示没有默认工作流。
+default_workflow_dir = default_workflow
 ; 单个上传文件的大小上限，单位 MB；普通上传和插件上传共用这一个上限
 max_upload_mb = 20

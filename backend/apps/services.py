@@ -2,9 +2,12 @@
 
 import json
 import re
+import tempfile
 from pathlib import Path
 
 from django.conf import settings
+
+from skills import load_skill_file  # core：能不能当 skill，以它的判断为准
 
 from . import harness
 from .models import ChatSession, Message
@@ -134,8 +137,13 @@ def save_upload(session: ChatSession, uploaded) -> dict:
 #       <文件名>.md          一个插件：用户上传什么就存什么，一个字节不改；文件名就是插件名
 #       state.json           哪些插件被勾选：{"<文件名>": true}
 #
-# 对文件内容没有任何要求（不需要 frontmatter，也不要求是 UTF-8）；唯一的条件是文件名以 .md 结尾。
+# 上传的文件要求：文件名以 .md 结尾，并且开头有 frontmatter（--- 包起来的 name 和 description）——
+# 勾选之后 core 要读它的 name / description，把全文注入对话（见 harness.skills_message_for）。文件本身原样保存，一个字节不改。
 # 没有数据库表：目录就是数据，手动增删文件也立刻生效。
+#
+# 另外还有「默认插件」：config.ini 的 [storage] default_skills_dir 指向的目录，里面的 .md 对所有会话可见，
+# 不能删除（接口返回 403）。它们只读：不会被复制进会话目录，也不会被改动；
+# 「是否勾选」仍然各会话各自记在自己的 state.json 里。同名的上传会被拒绝（409），默认插件始终只有一份。
 
 STATE_FILE = "state.json"
 MAX_NAME_LENGTH = 200
@@ -209,38 +217,89 @@ def _write_state(session: ChatSession, state: dict) -> None:
     (root / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _plugin(name: str, state: dict) -> dict:
-    return {"name": name, "enabled": state.get(name, False)}
+def _plugin(name: str, state: dict, default: bool = False) -> dict:
+    return {"name": name, "enabled": state.get(name, False), "default": default}
+
+
+def _md_names(directory: Path) -> list[str]:
+    """目录里的 .md 文件名（只算文件，不含子目录和别的杂物），按名称排序；目录不存在就是空。"""
+    if not directory.is_dir():
+        return []
+    return sorted(e.name for e in directory.iterdir() if e.is_file() and e.name.lower().endswith(".md"))
+
+
+def _default_root() -> Path | None:
+    """默认插件目录；没配置就是 None。"""
+    return Path(settings.HARNESS_DEFAULT_SKILLS_DIR) if settings.HARNESS_DEFAULT_SKILLS_DIR else None
+
+
+def _default_names() -> list[str]:
+    root = _default_root()
+    return _md_names(root) if root else []
+
+
+def _default_path(name: str) -> Path | None:
+    """名称对应的默认插件文件；不是默认插件就是 None。比较时不分大小写（和文件系统一致）。"""
+    root = _default_root()
+    if root is None:
+        return None
+    for n in _default_names():
+        if n.lower() == name.lower():
+            return root / n
+    return None
 
 
 def list_plugins(session: ChatSession) -> list[dict]:
-    """列出这个会话的插件，按名称排序。只算 skills/ 下的 .md 文件，目录和别的杂物都跳过。"""
-    root = _root(session)
-    if not root.is_dir():
-        return []
+    """列出这个会话能看到的插件：先是默认插件（所有会话都有），再是会话自己的；各自按名称排序。"""
     state = _read_state(session)
-    names = sorted(e.name for e in root.iterdir() if e.is_file() and e.name.lower().endswith(".md"))
-    return [_plugin(n, state) for n in names]
+    defaults = [_plugin(n, state, default=True) for n in _default_names()]
+    own = [_plugin(n, state) for n in _md_names(_root(session))]
+    return defaults + own
 
 
 def get_plugin(session: ChatSession, name: str) -> dict:
     """详情：多一个 content（文件全文）。文件不是 UTF-8 时解不了的字节用 � 代替，不会崩。"""
+    state = _read_state(session)
+    default = _default_path(name)
+    if default is not None:
+        return {**_plugin(default.name, state, default=True), "content": default.read_bytes().decode("utf-8", errors="replace")}
     path = _plugin_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到插件 {name}", status=404)
-    return {**_plugin(name, _read_state(session)), "content": path.read_bytes().decode("utf-8", errors="replace")}
+    return {**_plugin(name, state), "content": path.read_bytes().decode("utf-8", errors="replace")}
+
+
+def _check_frontmatter(raw: bytes) -> None:
+    """上传的内容要能被 core 当 skill 用：开头有 frontmatter，里面有合规的 name 和 description。
+
+    不自己再写一遍解析规则，直接用 core 的 skills.load_skill_file：能不能当 skill，以 core 的判断为准。
+    它只认磁盘上的文件，所以先写到临时文件里让它读。
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "probe.md"
+        probe.write_bytes(raw)
+        try:
+            load_skill_file(str(probe))
+        except ValueError as e:
+            raise PluginError(
+                f"插件文件开头必须有 frontmatter，包含 name（小写字母、数字、连字符）和 description：{e}"
+            ) from None
 
 
 def create_plugin(session: ChatSession, uploaded) -> dict:
     """上传一个 .md 文件：原样存成 skills/<文件名>，默认不勾选。大小上限和文件上传共用（config.ini 的 max_upload_mb）。"""
     name = plugin_name(uploaded.name or "")
+    if _default_path(name) is not None:  # 默认插件始终只有一份，不允许被同名文件盖住
+        raise PluginError(f"已经有叫 {name} 的默认插件，请换一个文件名", status=409)
     if uploaded.size > settings.HARNESS_MAX_UPLOAD_BYTES:
         raise PluginError(f"文件太大，最大 {settings.HARNESS_MAX_UPLOAD_BYTES // (1024 * 1024)} MB", status=413)
+    raw = uploaded.read()
+    _check_frontmatter(raw)  # 先校验再落盘：不合格的不会在磁盘上留下任何东西
     root = _root(session)
     root.mkdir(parents=True, exist_ok=True)
     try:
         with open(root / name, "xb") as f:  # x：已经有同名文件就报错，而不是覆盖
-            f.write(uploaded.read())
+            f.write(raw)
     except FileExistsError:
         raise PluginError(f"已经有叫 {name} 的插件，请先删除再上传", status=409) from None
     state = _read_state(session)
@@ -252,17 +311,25 @@ def create_plugin(session: ChatSession, uploaded) -> dict:
 
 
 def set_plugin_enabled(session: ChatSession, name: str, enabled: bool) -> dict:
-    if not _plugin_path(session, name).is_file():
-        raise PluginError(f"找不到插件 {name}", status=404)
+    """勾选 / 取消勾选。默认插件也可以勾选，状态记在这个会话自己的 state.json 里（默认目录一个字节都不动）。"""
+    default = _default_path(name)
+    if default is not None:
+        name, is_default = default.name, True
+    else:
+        if not _plugin_path(session, name).is_file():
+            raise PluginError(f"找不到插件 {name}", status=404)
+        is_default = False
     state = _read_state(session)
     state[name] = enabled
     _write_state(session, state)
-    plugin = _plugin(name, state)
+    plugin = _plugin(name, state, default=is_default)
     apply_to_core("updated", session, plugin)
     return plugin
 
 
 def delete_plugin(session: ChatSession, name: str) -> None:
+    if _default_path(name) is not None:
+        raise PluginError(f"{name} 是默认插件，不能删除", status=403)
     path = _plugin_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到插件 {name}", status=404)
@@ -272,3 +339,19 @@ def delete_plugin(session: ChatSession, name: str) -> None:
     if state.pop(name, None) is not None:
         _write_state(session, state)
     apply_to_core("deleted", session, plugin)
+
+
+def checked_plugin_paths(session: ChatSession) -> list[str]:
+    """这个会话里已勾选的插件的文件路径：默认插件在前、会话自己的在后，各自按名称排序。
+
+    文件已经不在了的（勾选后被手动删掉）直接跳过，不报错。注入给 core 用。
+    """
+    state = _read_state(session)
+    paths = []
+    for name in _default_names():
+        if state.get(name):
+            paths.append(str(_default_root() / name))
+    for name in _md_names(_root(session)):
+        if state.get(name):
+            paths.append(str(_root(session) / name))
+    return paths

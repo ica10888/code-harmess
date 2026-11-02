@@ -776,3 +776,46 @@ def test_run_terminal_loop_is_unaffected_by_model_and_effort():
     provider = OptionsProvider([Reply(texts=["hi"])])
     Agent(provider, [], scripted("hello")).run()
     assert provider.options == [{"model": None, "effort": None}]
+
+
+# --- respond 的 skills_message：勾选的 skill 全文放进这一轮的上下文 ---------------------------
+
+
+def test_respond_puts_the_skills_message_in_the_conversation_before_the_users_text():
+    provider = FakeProvider([Reply(texts=["ok"])])
+    agent = Agent(provider, [], scripted())
+
+    agent.respond("请审查", skills_message="<skill>X</skill>")
+
+    sent = provider.chats[0]
+    assert [m["role"] for m in sent] == ["user", "user"]
+    assert sent[0]["content"] == "<skill>X</skill>" and sent[1]["content"] == "请审查"  # skill 在前，用户的话在后
+
+
+def test_respond_without_skills_message_is_unchanged():
+    provider = FakeProvider([Reply(texts=["ok"])])
+    Agent(provider, [], scripted()).respond("hi")
+    assert provider.chats[0] == [{"role": "user", "content": "hi"}]
+
+
+def test_the_skills_message_stays_in_the_history_for_the_next_turn():
+    provider = FakeProvider([Reply(texts=["one"]), Reply(texts=["two"])])
+    agent = Agent(provider, [], scripted())
+
+    agent.respond("first", skills_message="<skill>X</skill>")
+    agent.respond("second")
+
+    assert any(m["content"] == "<skill>X</skill>" for m in provider.chats[1])  # 第二轮也还带着（和 /skill名 一样）
+
+
+def test_respond_failure_does_not_keep_the_skills_message_either():
+    class Boom(FakeProvider):
+        def chat(self, conversation, tools, system=""):
+            raise RuntimeError("boom")
+
+    agent = Agent(Boom([]), [], scripted())
+
+    with pytest.raises(RuntimeError):
+        agent.respond("hi", skills_message="<skill>X</skill>")
+
+    assert agent.current.conversation == []

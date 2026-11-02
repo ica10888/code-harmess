@@ -65,6 +65,13 @@ DEEPSEEK_BASE_URL = config.get("deepseek", "base_url", fallback="https://api.dee
 
 # 存储路径：每个会话的文件放在 <HARNESS_STORAGE_DIR>/input/<会话id>/file/（读自 config.ini 的 [storage]）
 HARNESS_STORAGE_DIR = str((BASE_DIR / config.get("storage", "dir", fallback="storage")).resolve())
+# 默认插件目录：里面的 .md 对所有会话可见、不能删除（读自 config.ini 的 [storage] default_skills_dir）。
+# 留空表示没有默认插件。相对路径按 backend/ 解析；目录不存在也不报错，只是没有默认插件。
+_default_skills = config.get("storage", "default_skills_dir", fallback="").strip()
+HARNESS_DEFAULT_SKILLS_DIR = str((BASE_DIR / _default_skills).resolve()) if _default_skills else ""
+# 默认工作流目录：规则同默认插件（读自 config.ini 的 [storage] default_workflow_dir）
+_default_workflow = config.get("storage", "default_workflow_dir", fallback="").strip()
+HARNESS_DEFAULT_WORKFLOW_DIR = str((BASE_DIR / _default_workflow).resolve()) if _default_workflow else ""
 # 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
 HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024
 

@@ -504,6 +504,7 @@ class Agent:
         on_text: Callable[[str], None] | None = None,
         model: str | None = None,
         effort: str | None = None,
+        skills_message: str | None = None,
     ) -> Answer:
         """没有终端的一问一答（后端用）：处理一句用户的话，返回模型说的文字。
 
@@ -515,8 +516,14 @@ class Agent:
         多轮（中间调了工具）的文字之间会补一个 "\\n\\n"，所以把所有片段拼起来，就等于 "\\n\\n".join(answer.texts)。
 
         model / effort：这一句话用哪个模型、多强的推理；不给就用 provider 自己的默认。工具循环的每一轮都用同一组。
+
+        skills_message：用户勾选的 skill 全文（skills.skills_message 的结果）。放在这句话之前、作为一条 user 消息，
+        之后一直留在对话里，和 run() 里 /skill名 调用的效果一样；这一轮失败时对话整体回滚，它也不会留下。
         """
-        conversation = [*self.current.conversation, {"role": "user", "content": user_input}]
+        conversation = [*self.current.conversation]
+        if skills_message:
+            conversation.append({"role": "user", "content": skills_message})
+        conversation.append({"role": "user", "content": user_input})
         texts: list[str] = []
         for _ in range(self.max_tool_rounds):
             round_on_text = self._with_separator(on_text, needs_separator=bool(texts)) if on_text else None

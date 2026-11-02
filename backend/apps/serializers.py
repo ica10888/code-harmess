@@ -39,6 +39,7 @@ class PluginSerializer(serializers.Serializer):
 
     name = serializers.CharField(read_only=True)
     enabled = serializers.BooleanField()
+    default = serializers.BooleanField(read_only=True)  # 默认插件：所有会话都有，不能删除
 
 
 class PluginDetailSerializer(PluginSerializer):

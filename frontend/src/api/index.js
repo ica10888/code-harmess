@@ -81,3 +81,20 @@ export const setPluginEnabled = (sessionId, name, enabled) =>
   http.patch(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
 export const deletePlugin = (sessionId, name) =>
   http.delete(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`)
+
+// --- 工作流管理：和插件完全对称，文件存在后端 <存储路径>/input/<会话id>/workflow/ ---
+/** 详情：多一个 content（文件全文），点名称看内容时用。 */
+export const getPlugin = (sessionId, name) =>
+  http.get(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`).then((r) => r.data)
+export const getWorkflow = (sessionId, name) =>
+  http.get(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`).then((r) => r.data)
+export const listWorkflows = (sessionId) => http.get(`/sessions/${sessionId}/workflows/`).then((r) => r.data)
+export const addWorkflow = (sessionId, file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return http.post(`/sessions/${sessionId}/workflows/`, form).then((r) => r.data)
+}
+export const setWorkflowEnabled = (sessionId, name, enabled) =>
+  http.patch(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
+export const deleteWorkflow = (sessionId, name) =>
+  http.delete(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`)

@@ -5,6 +5,7 @@
 """
 
 import json
+import logging
 import os
 import queue
 import threading
@@ -17,7 +18,10 @@ from django.conf import settings
 from agent import DEFAULT_SESSION, Agent  # noqa: E402
 from prompt import PromptContext, build_system_prompt  # noqa: E402
 from providers import DeepSeekProvider  # noqa: E402
+from skills import load_skill_file, skills_message  # noqa: E402
 from tools import workspace_tools  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 EMPTY_REPLY = "（模型没有返回文字）"
 PAUSED_NOTICE = "已连续 {rounds} 轮工具调用，先暂停；回复「继续」让我接着做。"
@@ -64,6 +68,11 @@ def skills_dir(session) -> str:
     return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "skills")
 
 
+def workflow_dir(session) -> str:
+    """这个会话的工作流目录：<存储路径>/input/<会话id>/workflow，和 file/、skills/ 同级。每个工作流是其中的 <文件名>.md。"""
+    return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "workflow")
+
+
 def _agent(session, model: str | None = None) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 
@@ -103,13 +112,42 @@ def _finish(session, agent: Agent, answer) -> str:
     return "\n\n".join(texts) or EMPTY_REPLY
 
 
+def skills_message_for(session) -> str | None:
+    """用户勾选的插件里，这个会话的对话还没带上的，合成一条要注入的消息（core 的 skills.skills_message）。
+
+    已经注入过的不再注入：每句话都重复塞一遍全文会白白占满上下文。判断办法很直接——对话里已经有这个 skill 的
+    <skill name="..."> 块就算注入过，不额外存状态。读不了 / 格式不对的 skill 由 core 跳过并给出警告，这里记下日志，
+    绝不让一个坏文件拖垮整次请求。
+    """
+    from . import services  # 避免循环导入：services 也 import 了 harness
+
+    already = "\n".join(str(m.get("content")) for m in session.conversation if m.get("role") == "user")
+    paths = []
+    for path in services.checked_plugin_paths(session):
+        try:
+            name = load_skill_file(path).name
+        except (OSError, ValueError):
+            paths.append(path)  # 读不了的也交给 core，由它统一给警告并跳过
+            continue
+        if f'<skill name="{name}">' not in already:
+            paths.append(path)
+    message, warnings = skills_message(paths)
+    for warning in warnings:
+        logger.warning("session %s: %s", session.id, warning)
+    return message
+
+
 def run_turn(session, user_text: str, model: str | None = None, effort: str | None = None) -> str:
     """处理用户的一句话，返回要展示给用户的回复。model / effort 是本次请求选的模型和推理强度，不给就用默认。
 
     Agent.respond 在副本上推进对话，整轮成功才写回；中途抛异常时对话原样不动，所以这里也只在成功后才保存。
     """
     agent = _agent(session, model)
-    return _finish(session, agent, agent.respond(user_text, model=model, effort=effort))
+    return _finish(
+        session,
+        agent,
+        agent.respond(user_text, model=model, effort=effort, skills_message=skills_message_for(session)),
+    )
 
 
 def stream_turn(session, user_text: str, model: str | None = None, effort: str | None = None):
@@ -122,11 +160,16 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
     pieces: queue.Queue = queue.Queue()
     outcome: dict = {}
     agent = _agent(session, model)
+    injected = skills_message_for(session)  # 在线程外算好：读文件和读数据库都放在请求线程里
 
     def work():
         try:
             outcome["answer"] = agent.respond(
-                user_text, on_text=lambda t: pieces.put(("delta", t)), model=model, effort=effort
+                user_text,
+                on_text=lambda t: pieces.put(("delta", t)),
+                model=model,
+                effort=effort,
+                skills_message=injected,
             )
         except Exception as e:  # 交给生成器所在的线程去抛
             outcome["error"] = e

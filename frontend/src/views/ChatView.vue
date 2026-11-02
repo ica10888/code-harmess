@@ -19,6 +19,10 @@ const pendingFile = ref(null) // 已选好、还没上传的文件；点「发�
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
+const checkedPlugins = ref(0) // 当前会话已勾选的插件数；勾了插件即使不写文字也能发送
+// 没写文字、但上传了文件或勾了插件时，用这句话代替，让模型照着去做
+const DEFAULT_TEXT = '请根据我上传的文件和勾选的插件开始。'
+const rightCollapsed = ref(false) // 右栏（插件 + 工作流）是否收起
 const listEl = ref(null)
 
 let closeStream = null
@@ -58,11 +62,11 @@ async function newSession() {
 }
 
 async function send() {
-  const content = draft.value.trim()
   const attachment = pendingFile.value
+  const content = draft.value.trim() || (attachment || checkedPlugins.value ? DEFAULT_TEXT : '')
   const options = buildSendOptions(modelChoice.value) // 点发送这一刻的选择，随这句话一起透传给后端
-  // 有文件时，没有文字也能发（只上传）；两样都没有就不动
-  if ((!content && !attachment) || !currentId.value || sending.value) return
+  // 有文件或勾了插件时，没有文字也能发；什么都没有就不动
+  if (!content || !currentId.value || sending.value) return
   sending.value = true
   try {
     // 先上传文件，await 它结束，才发送文本——sendWithAttachment 保证这个先后顺序，上传失败就不会发文本
@@ -200,7 +204,7 @@ onBeforeUnmount(() => closeStream && closeStream())
             <el-button
               type="primary"
               :loading="sending"
-              :disabled="!draft.trim() && !pendingFile"
+              :disabled="!draft.trim() && !pendingFile && !checkedPlugins"
               @click="send"
             >
               {{ stage || '发送' }}
@@ -210,7 +214,22 @@ onBeforeUnmount(() => closeStream && closeStream())
       </div>
     </main>
 
-    <PluginPanel :session-id="currentId" />
+    <!-- 右栏：插件框在上，工作流框在下；一个按钮同时收起 / 展开两个框（只是隐藏，状态不丢） -->
+    <aside class="side-panels" :class="{ collapsed: rightCollapsed }">
+      <el-button
+        circle
+        size="small"
+        class="toggle"
+        :title="rightCollapsed ? '展开插件和工作流' : '收起插件和工作流'"
+        @click="rightCollapsed = !rightCollapsed"
+      >
+        {{ rightCollapsed ? '‹' : '›' }}
+      </el-button>
+      <div v-show="!rightCollapsed" class="panels">
+        <PluginPanel :session-id="currentId" @checked="(n) => (checkedPlugins = n)" />
+        <PluginPanel :session-id="currentId" kind="workflow" />
+      </div>
+    </aside>
   </div>
 </template>
 
@@ -218,6 +237,33 @@ onBeforeUnmount(() => closeStream && closeStream())
 .chat {
   display: flex;
   height: 100%;
+}
+.side-panels {
+  position: relative;
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #e4e7ed;
+  transition: width 0.2s;
+}
+.side-panels.collapsed {
+  width: 44px;
+}
+.toggle {
+  position: absolute;
+  top: 12px;
+  right: 8px;
+  z-index: 1;
+}
+.collapsed .toggle {
+  right: 6px;
+}
+.panels {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 .sidebar {
   width: 240px;
