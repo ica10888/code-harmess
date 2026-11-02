@@ -47,6 +47,24 @@ class MessageListView(APIView):
         return Response(MessageSerializer(messages, many=True).data, status=status.HTTP_201_CREATED)
 
 
+def sse_frame(event: str, data) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+class StreamMessageView(APIView):
+    """发一句话，回复边生成边推回来（SSE 格式的 POST 响应）。事件见 services.stream_user_message。"""
+
+    def post(self, request, session_id):
+        session = get_own_session(request, session_id)
+        serializer = SendMessageSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        events = services.stream_user_message(session, serializer.validated_data["content"])
+        response = StreamingHttpResponse((sse_frame(e, d) for e, d in events), content_type="text/event-stream")
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
+
+
 def iter_events(session, last_id, poll_seconds=1.0, max_loops=None):
     """SSE 帧生成器：每隔 poll_seconds 查一次库，有新消息就发，没有就发心跳（保持连接）。
 

@@ -186,3 +186,77 @@ def test_prune_is_idempotent_and_skips_short_results():
     conv = _conversation_with_tool_results(3)
     assert _provider().prune_tool_results(conv, keep_last=0) == 3
     assert _provider().prune_tool_results(conv, keep_last=0) == 0  # 已清理过的不再动
+
+
+# --- 流式：on_text 逐段收到文字，拼出来的 assistant 消息和不流式时一样 -------------------
+
+
+class FakeStreamingOpenAI:
+    """stream=True 时 create 返回一串 chunk（最后一个只带 usage），记录收到的参数。"""
+
+    def __init__(self, chunks):
+        self.calls: list[dict] = []
+        self.chat = NS(completions=NS(create=self._create))
+        self._chunks = chunks
+
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return iter(self._chunks)
+
+
+def _chunk(content=None, reasoning=None, tool_calls=None, usage=None, choices=True):
+    delta = NS(content=content, reasoning_content=reasoning, tool_calls=tool_calls)
+    return NS(choices=[NS(delta=delta)] if choices else [], usage=usage)
+
+
+def _tool_delta(index, id=None, name=None, arguments=None):
+    return NS(index=index, id=id, function=NS(name=name, arguments=arguments))
+
+
+def test_streaming_calls_on_text_per_piece_and_builds_the_same_assistant_message():
+    client = FakeStreamingOpenAI(
+        [
+            _chunk(reasoning="think "),
+            _chunk(reasoning="more"),
+            _chunk(content="Hel"),
+            _chunk(content="lo"),
+            _chunk(choices=False, usage=NS(prompt_tokens=7, completion_tokens=2, prompt_cache_hit_tokens=3)),
+        ]
+    )
+    pieces: list[str] = []
+    conversation: list[dict] = [{"role": "user", "content": "hi"}]
+
+    reply = DeepSeekProvider(client=client).chat(conversation, [], "SYS", on_text=pieces.append)
+
+    assert pieces == ["Hel", "lo"]  # 思考内容不外传
+    assert reply.texts == ["Hello"]
+    assert reply.usage == Usage(7, 2, 3)
+    assert conversation[-1] == {"role": "assistant", "content": "Hello", "reasoning_content": "think more"}
+    assert client.calls[0]["stream"] is True
+    assert client.calls[0]["stream_options"] == {"include_usage": True}
+
+
+def test_streaming_assembles_tool_calls_from_argument_fragments():
+    client = FakeStreamingOpenAI(
+        [
+            _chunk(tool_calls=[_tool_delta(0, id="c1", name="read_file", arguments="")]),
+            _chunk(tool_calls=[_tool_delta(0, arguments='{"path": ')]),
+            _chunk(tool_calls=[_tool_delta(0, arguments='"a.txt"}')]),
+            _chunk(tool_calls=[_tool_delta(1, id="c2", name="list_files", arguments="{}")]),
+        ]
+    )
+    conversation: list[dict] = []
+
+    reply = DeepSeekProvider(client=client).chat(conversation, [read_file], on_text=lambda t: None)
+
+    assert reply.texts == []
+    assert reply.tool_calls == [ToolCall("c1", "read_file", {"path": "a.txt"}), ToolCall("c2", "list_files", {})]
+    assert [c["id"] for c in conversation[-1]["tool_calls"]] == ["c1", "c2"]  # 每个 id 都进了 assistant 消息
+
+
+def test_without_on_text_the_request_is_not_streamed():
+    client = FakeOpenAI(_message(content="hi"))
+
+    DeepSeekProvider(client=client).chat([], [])
+
+    assert "stream" not in client.calls[0] and "stream_options" not in client.calls[0]

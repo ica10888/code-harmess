@@ -2,6 +2,7 @@
 
 from . import harness
 from .models import ChatSession, Message
+from .serializers import MessageSerializer
 
 
 def owner_key_of(request):
@@ -30,3 +31,23 @@ def send_user_message(session: ChatSession, user_text: str) -> list[Message]:
     reply = generate_reply(session, user_text)
     assistant_message = Message.objects.create(session=session, role="assistant", content=reply)
     return [user_message, assistant_message]
+
+
+def stream_user_message(session: ChatSession, user_text: str):
+    """send_user_message 的流式版：依次产出 (事件名, 数据)。
+
+    user    存好的用户消息（前端用它替换自己先显示的那条）
+    delta   模型刚吐出的一段文字 {"text": ...}
+    done    存好的完整 assistant 消息（前端用它替换正在长出来的气泡）
+    调用模型失败时不抛异常：把原因当作回复存下来，照样以 done 结束。
+    """
+    yield "user", MessageSerializer(Message.objects.create(session=session, role="user", content=user_text)).data
+    try:
+        for kind, data in harness.stream_turn(session, user_text):
+            if kind == "delta":
+                yield "delta", {"text": data}
+            else:
+                reply = data
+    except Exception as e:
+        reply = f"调用模型失败：{e}"
+    yield "done", MessageSerializer(Message.objects.create(session=session, role="assistant", content=reply)).data

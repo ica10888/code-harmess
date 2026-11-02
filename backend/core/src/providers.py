@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace as NS
 from typing import Any, Protocol
 
 from tools import Tool
@@ -109,10 +111,21 @@ class DeepSeekProvider:
             },
         }
 
-    def chat(self, conversation: list[dict], tools: list[Tool], system: str = "") -> Reply:
+    def chat(
+        self,
+        conversation: list[dict],
+        tools: list[Tool],
+        system: str = "",
+        on_text: Callable[[str], None] | None = None,
+    ) -> Reply:
+        """on_text 不为 None 时走流式：模型每吐出一段文字就调用一次；返回值和 conversation 里的内容与不流式时一样。"""
         extra: dict[str, Any] = {}
         if tools:  # OpenAI 协议不接受空的 tools 数组
             extra["tools"] = [self._tool_param(t) for t in tools]
+        if on_text:
+            # include_usage：流的最后多一个只带 usage 的 chunk，不然流式拿不到 token 数
+            extra["stream"] = True
+            extra["stream_options"] = {"include_usage": True}
         # OpenAI 协议里 system prompt 就是排在最前面的一条 role=system 消息；每次请求现拼，不进 conversation。
         messages = [{"role": "system", "content": system}, *conversation] if system else conversation
         response = self.client.chat.completions.create(
@@ -122,12 +135,49 @@ class DeepSeekProvider:
             reasoning_effort=self.reasoning_effort,
             **extra,
         )
-        message = response.choices[0].message
+        if on_text:
+            message, usage = self._read_stream(response, on_text)
+        else:
+            message, usage = response.choices[0].message, self._usage(response)
         conversation.append(self._assistant_message(message))
 
         texts = [message.content] if message.content else []
         tool_calls = [self._tool_call(tc) for tc in (message.tool_calls or [])]
-        return Reply(texts=texts, tool_calls=tool_calls, usage=self._usage(response))
+        return Reply(texts=texts, tool_calls=tool_calls, usage=usage)
+
+    @classmethod
+    def _read_stream(cls, stream: Any, on_text: Callable[[str], None]) -> tuple[Any, Usage | None]:
+        """把一串 chunk 拼回一条完整的 message（和不流式时同样的形状），文字边来边交给 on_text。
+
+        工具调用的参数是分成很多段的 JSON 碎片，按 index 拼起来；思考内容（reasoning_content）只攒着、不外传，
+        但要拼进 message：DeepSeek 要求它在后续请求里原样回灌。
+        """
+        content: list[str] = []
+        reasoning: list[str] = []
+        calls: dict[int, Any] = {}
+        usage = None
+        for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = cls._usage(chunk)
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if getattr(delta, "reasoning_content", None):
+                reasoning.append(delta.reasoning_content)
+            if delta.content:
+                content.append(delta.content)
+                on_text(delta.content)
+            for piece in delta.tool_calls or []:
+                call = calls.setdefault(piece.index, NS(id=None, function=NS(name=None, arguments="")))
+                call.id = piece.id or call.id
+                call.function.name = piece.function.name or call.function.name
+                call.function.arguments += piece.function.arguments or ""
+        message = NS(
+            content="".join(content) or None,
+            reasoning_content="".join(reasoning) or None,
+            tool_calls=[calls[i] for i in sorted(calls)] or None,
+        )
+        return message, usage
 
     @staticmethod
     def _usage(response: Any) -> Usage | None:

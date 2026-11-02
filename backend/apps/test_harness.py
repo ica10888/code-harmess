@@ -4,6 +4,7 @@ HARNESS_LIVE=1 时才会跑文件末尾的 live 测试（打真实 DeepSeek，�
 """
 
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps import harness
-from apps.models import ChatSession
+from apps.models import ChatSession, Message
 from providers import Reply, ToolCall, Usage
 
 
@@ -28,12 +29,15 @@ class FakeProvider:
         self.calls = []
         self.pruned = []
 
-    def chat(self, conversation, tools, system=""):
+    def chat(self, conversation, tools, system="", on_text=None):
         self.calls.append({"conversation": copy.deepcopy(conversation), "tools": [t.name for t in tools], "system": system})
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
         conversation.append({"role": "assistant", "content": "".join(reply.texts) or None})
+        for piece in reply.texts if on_text else []:
+            on_text(piece[: len(piece) // 2])  # 拆成两段，像真的流式
+            on_text(piece[len(piece) // 2 :])
         return reply
 
     def tool_results(self, results):
@@ -204,3 +208,81 @@ class LiveTests(TestCase):
 
         second = client.post(f"/api/sessions/{sid}/messages/", {"content": "我上一句让你找的是哪个文件？"}, format="json").json()
         assert "AGENTS.md" in second[1]["content"]  # 记得上一轮
+
+
+def sse_events(response):
+    """把流式响应解析成 [(event, data)]。"""
+    body = b"".join(response.streaming_content).decode("utf-8")
+    events = []
+    for frame in filter(None, body.split("\n\n")):
+        lines = dict(line.split(": ", 1) for line in frame.splitlines())
+        events.append((lines["event"], json.loads(lines["data"])))
+    return events
+
+
+class StreamTurnTests(TestCase):
+    def stream(self, provider, user_text="hi", session=None):
+        session = session or ChatSession.objects.create(owner_key="k")
+        with mock.patch("apps.harness.get_provider", return_value=provider):
+            return session, list(harness.stream_turn(session, user_text))
+
+    def test_yields_text_pieces_then_the_full_final_text_and_saves_the_conversation(self):
+        session, events = self.stream(FakeProvider(text("你好世界")))
+        assert events[:-1] == [("delta", "你好"), ("delta", "世界")]
+        assert events[-1] == ("done", "你好世界")
+        assert [m["role"] for m in ChatSession.objects.get(pk=session.pk).conversation] == ["user", "assistant"]
+
+    def test_final_text_includes_the_pause_notice_that_was_never_streamed(self):
+        looping = [calls(ToolCall(f"c{i}", "list_files", {"path": "."})) for i in range(2)]
+        with override_settings(HARNESS_MAX_TOOL_ROUNDS=2):
+            _, events = self.stream(FakeProvider(*looping))
+        kind, final = events[-1]
+        assert kind == "done" and "2 轮" in final
+
+    def test_failure_is_raised_to_the_caller_and_the_conversation_is_untouched(self):
+        session = ChatSession.objects.create(owner_key="k")
+        with self.assertRaisesMessage(RuntimeError, "boom"):
+            self.stream(FakeProvider(RuntimeError("boom")), session=session)
+        assert ChatSession.objects.get(pk=session.pk).conversation == []
+
+
+class StreamMessageApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.sid = self.client.post("/api/sessions/", {}, format="json").json()["id"]
+        self.url = f"/api/sessions/{self.sid}/messages/stream/"
+
+    def post(self, provider, content="hi", client=None):
+        # 流是惰性的：要在 mock 还生效时就读完，否则消费流时 get_provider 已经是真的了
+        with mock.patch("apps.harness.get_provider", return_value=provider):
+            res = (client or self.client).post(self.url, {"content": content}, format="json")
+            if res["Content-Type"].startswith("text/event-stream"):
+                res.events = sse_events(res)
+            return res
+
+    def test_streams_user_then_deltas_then_done_and_stores_both_messages(self):
+        res = self.post(FakeProvider(text("你好世界")), "问")
+        assert res["Content-Type"].startswith("text/event-stream") and res["Cache-Control"] == "no-cache"
+        events = res.events
+        assert [e for e, _ in events] == ["user", "delta", "delta", "done"]
+        assert events[0][1]["content"] == "问" and events[0][1]["role"] == "user"
+        assert "".join(d["text"] for e, d in events if e == "delta") == "你好世界"
+        done = events[-1][1]
+        assert done["role"] == "assistant" and done["content"] == "你好世界"
+        stored = list(Message.objects.filter(session_id=self.sid))
+        assert [(m.role, m.content) for m in stored] == [("user", "问"), ("assistant", "你好世界")]
+        assert done["id"] == stored[1].id  # 前端靠 id 把流式气泡换成这条真消息
+
+    def test_model_failure_ends_with_a_done_event_carrying_the_error_text(self):
+        events = self.post(FakeProvider(RuntimeError("boom"))).events
+        assert events[0][0] == "user"
+        kind, done = events[-1]
+        assert kind == "done" and "调用模型失败" in done["content"] and "boom" in done["content"]
+        assert ChatSession.objects.get(pk=self.sid).conversation == []  # 这一轮不进对话，重发即可
+
+    def test_blank_content_is_rejected_before_streaming(self):
+        assert self.post(FakeProvider(), "   ").status_code == 400
+        assert Message.objects.count() == 0
+
+    def test_other_browser_gets_404(self):
+        assert self.post(FakeProvider(), client=APIClient()).status_code == 404

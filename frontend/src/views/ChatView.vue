@@ -1,7 +1,8 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { createSession, listMessages, listSessions, openStream, sendMessage } from '../api'
+import { createSession, listMessages, listSessions, openStream, streamMessage } from '../api'
+import { createTypewriter } from '../utils/typewriter'
 
 const sessions = ref([])
 const currentId = ref(null)
@@ -12,12 +13,22 @@ const listEl = ref(null)
 
 let closeStream = null
 
+// 离底部不到这个距离，就认为用户正跟着看最新内容；超过了说明在往上翻，不能把页面拽回去
+const STICK_TO_BOTTOM_PX = 80
+
+function scrollToBottom({ force = false } = {}) {
+  const el = listEl.value
+  if (!el) return
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < STICK_TO_BOTTOM_PX
+  if (force || nearBottom) nextTick(() => (el.scrollTop = el.scrollHeight))
+}
+
 // 发送的回复和 SSE 推送可能带来同一条消息，按 id 去重
 function addMessages(incoming) {
   const known = new Set(messages.value.map((m) => m.id))
   for (const m of incoming) if (!known.has(m.id)) messages.value.push(m)
   messages.value.sort((a, b) => a.id - b.id)
-  nextTick(() => listEl.value && (listEl.value.scrollTop = listEl.value.scrollHeight))
+  scrollToBottom()
 }
 
 async function selectSession(id) {
@@ -39,10 +50,43 @@ async function send() {
   const content = draft.value.trim()
   if (!content || !currentId.value || sending.value) return
   sending.value = true
+  draft.value = ''
+  // 正在长出来的回复：先用一条临时消息（id 取 Infinity，排在最后），done 到来时换成存好的真消息。
+  // live 必须是 messages.value 里取回的响应式代理：改 push 之前的原对象，Vue 看不到，界面不会刷新。
+  let live = null
+  // delta 到达的节奏不均匀，交给打字机匀到每一帧，每帧最多更新一次界面
+  const typewriter = createTypewriter((text) => {
+    live.content += text
+    scrollToBottom()
+  })
+  const dropLive = () => {
+    typewriter.cancel()
+    if (live) messages.value.splice(messages.value.indexOf(live), 1)
+    live = null
+  }
   try {
-    addMessages(await sendMessage(currentId.value, content))
-    draft.value = ''
+    await streamMessage(currentId.value, content, {
+      user: (m) => {
+        addMessages([m])
+        scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
+      },
+      delta: ({ text }) => {
+        if (!live) {
+          messages.value.push({ id: Infinity, role: 'assistant', content: '' })
+          live = messages.value[messages.value.length - 1]
+        }
+        typewriter.push(text)
+      },
+      done: (m) => {
+        typewriter.finish() // 没打完的立刻补齐，再换成存好的真消息
+        dropLive()
+        addMessages([m])
+      },
+    })
   } catch {
+    // 流中途断了：去掉半截的临时消息，把没发成功的话放回输入框；已存的消息以服务器为准，刷新就能看到
+    dropLive()
+    draft.value = content
     ElMessage.error('发送失败，请重试')
   } finally {
     sending.value = false
@@ -161,6 +205,8 @@ onBeforeUnmount(() => closeStream && closeStream())
   white-space: pre-wrap;
   word-break: break-word;
   background: #f4f4f5;
+  /* 文字一直在长：让浏览器把重排限制在这个气泡内，不用每次都重算整个消息列表 */
+  contain: layout paint;
 }
 .row.user .bubble {
   background: #409eff;

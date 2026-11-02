@@ -6,6 +6,8 @@
 
 import json
 import os
+import queue
+import threading
 from datetime import datetime
 
 from django.conf import settings
@@ -76,15 +78,47 @@ def _agent(conversation: list[dict]) -> Agent:
     return agent
 
 
+def _finish(session, agent: Agent, answer) -> str:
+    """整轮成功后：保存对话，拼出要展示给用户的完整回复（run_turn 和 stream_turn 共用）。"""
+    session.conversation = json.loads(json.dumps(agent.current.conversation))  # 确保能存进 JSONField
+    session.save(update_fields=["conversation"])
+    texts = [*answer.texts, PAUSED_NOTICE.format(rounds=settings.HARNESS_MAX_TOOL_ROUNDS)] if answer.paused else answer.texts
+    return "\n\n".join(texts) or EMPTY_REPLY
+
+
 def run_turn(session, user_text: str) -> str:
     """处理用户的一句话，返回要展示给用户的回复。
 
     Agent.respond 在副本上推进对话，整轮成功才写回；中途抛异常时对话原样不动，所以这里也只在成功后才保存。
     """
     agent = _agent(session.conversation)
-    answer = agent.respond(user_text)
+    return _finish(session, agent, agent.respond(user_text))
 
-    session.conversation = json.loads(json.dumps(agent.current.conversation))  # 确保能存进 JSONField
-    session.save(update_fields=["conversation"])
-    texts = [*answer.texts, PAUSED_NOTICE.format(rounds=settings.HARNESS_MAX_TOOL_ROUNDS)] if answer.paused else answer.texts
-    return "\n\n".join(texts) or EMPTY_REPLY
+
+def stream_turn(session, user_text: str):
+    """和 run_turn 一样处理一句话，但边生成边吐：依次产出 ("delta", 一段文字) …… 最后产出 ("done", 完整回复)。
+
+    Agent.respond 是同步的，所以放在一个线程里跑，文字片段经队列交给这个生成器。
+    失败时在生成器里重新抛出异常（对话没动，调用方决定怎么告诉用户）。
+    "done" 的完整回复可能比流出去的文字多一句暂停提示，前端应以它为准。
+    """
+    pieces: queue.Queue = queue.Queue()
+    outcome: dict = {}
+    agent = _agent(session.conversation)
+
+    def work():
+        try:
+            outcome["answer"] = agent.respond(user_text, on_text=lambda t: pieces.put(("delta", t)))
+        except Exception as e:  # 交给生成器所在的线程去抛
+            outcome["error"] = e
+        finally:
+            pieces.put(None)
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    while (item := pieces.get()) is not None:
+        yield item
+    thread.join()
+    if "error" in outcome:
+        raise outcome["error"]
+    yield "done", _finish(session, agent, outcome["answer"])

@@ -659,3 +659,74 @@ def test_run_still_works_after_sharing_the_round_logic_with_respond(capsys):
 
     assert "hi there" in capsys.readouterr().out
     assert provider.prunes  # 超预算修剪也在 run() 里照常发生
+
+
+# --- respond 的流式：on_text 收到每一段文字 -------------------------------------------------
+
+
+class StreamingProvider(FakeProvider):
+    """和 FakeProvider 一样，但接受 on_text，并把每条回复的文字拆成两段推出去。"""
+
+    def chat(self, conversation, tools, system="", on_text=None):
+        reply = super().chat(conversation, tools, system)
+        for text in reply.texts:
+            half = len(text) // 2
+            if on_text:
+                on_text(text[:half])
+                on_text(text[half:])
+        return reply
+
+
+def test_respond_streams_text_pieces_to_on_text():
+    pieces: list[str] = []
+
+    answer = Agent(StreamingProvider([Reply(texts=["abcd"])]), [], scripted()).respond("go", on_text=pieces.append)
+
+    assert pieces == ["ab", "cd"]
+    assert answer.texts == ["abcd"]
+
+
+def test_respond_separates_the_text_of_different_rounds_in_the_stream(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("x")
+    provider = StreamingProvider(
+        [
+            Reply(texts=["look"], tool_calls=[ToolCall("c1", "read_file", {"path": str(f)})]),
+            Reply(texts=["done"]),
+        ]
+    )
+    pieces: list[str] = []
+
+    Agent(provider, [read_file], scripted()).respond("go", on_text=pieces.append)
+
+    assert "".join(pieces) == "look\n\ndone"  # 和最后拼出来的回复一致，流式显示和最终消息不会对不上
+
+
+def test_respond_without_on_text_still_works_with_providers_that_do_not_know_it():
+    # FakeProvider.chat 没有 on_text 参数：没人要流式时，Agent 不能把这个参数传过去
+    assert Agent(FakeProvider([Reply(texts=["ok"])]), [], scripted()).respond("go").texts == ["ok"]
+
+
+def test_respond_stream_adds_one_separator_even_when_middle_rounds_say_nothing(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("x")
+    tool = lambda i: Reply(tool_calls=[ToolCall(f"c{i}", "read_file", {"path": str(f)})])  # noqa: E731
+    provider = StreamingProvider([Reply(texts=["look"], tool_calls=tool(0).tool_calls), tool(1), tool(2), Reply(texts=["done"])])
+    pieces: list[str] = []
+
+    answer = Agent(provider, [read_file], scripted()).respond("go", on_text=pieces.append)
+
+    assert "".join(pieces) == "\n\n".join(answer.texts) == "look\n\ndone"  # 空轮次不能多出分隔符
+
+
+def test_respond_stream_adds_no_separator_before_the_first_text(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("x")
+    provider = StreamingProvider(
+        [Reply(tool_calls=[ToolCall("c0", "read_file", {"path": str(f)})]), Reply(texts=["only"])]
+    )
+    pieces: list[str] = []
+
+    Agent(provider, [read_file], scripted()).respond("go", on_text=pieces.append)
+
+    assert "".join(pieces) == "only"  # 前面一轮没说话，开头不能有空行

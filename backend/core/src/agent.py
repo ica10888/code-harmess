@@ -455,9 +455,13 @@ class Agent:
                 continue
             need_user_input = False  # 有工具调用 → 不等用户，直接再问模型
 
-    def _ask_model(self, conversation: list[dict]) -> Reply:
-        """问一次模型（run 和 respond 共用）：记下输入 token，超预算就批量修剪旧工具结果。"""
-        reply = self.provider.chat(conversation, list(self.tools.values()), self.system)
+    def _ask_model(self, conversation: list[dict], on_text: Callable[[str], None] | None = None) -> Reply:
+        """问一次模型（run 和 respond 共用）：记下输入 token，超预算就批量修剪旧工具结果。
+
+        on_text 只在要流式时才传给 provider：不认识这个参数的 provider（比如测试里的 fake）照常能用。
+        """
+        extra = {"on_text": on_text} if on_text else {}
+        reply = self.provider.chat(conversation, list(self.tools.values()), self.system, **extra)
         if reply.usage:
             self._log_usage(reply.usage)
             self.current.last_input_tokens = reply.usage.input_tokens
@@ -470,17 +474,38 @@ class Agent:
                     )
         return reply
 
-    def respond(self, user_input: str) -> Answer:
+    @staticmethod
+    def _with_separator(on_text: Callable[[str], None], needs_separator: bool) -> Callable[[str], None]:
+        """包一层 on_text：这一轮的第一段文字之前补一个 "\\n\\n"（前面已经说过话才补）。
+
+        不能在每轮开头就补：中间那些只调工具、不说话的轮次，会白白多出空行，流式拼出来就和最终消息对不上。
+        """
+        pending = needs_separator
+
+        def emit(piece: str) -> None:
+            nonlocal pending
+            if pending:
+                on_text("\n\n")
+                pending = False
+            on_text(piece)
+
+        return emit
+
+    def respond(self, user_input: str, on_text: Callable[[str], None] | None = None) -> Answer:
         """没有终端的一问一答（后端用）：处理一句用户的话，返回模型说的文字。
 
         和 run() 是同一套一轮逻辑（问模型 → 执行工具 → 回灌，直到没有工具调用或到轮数上限），
         区别是不读输入、不打印、不处理斜杠命令。需要审批的工具走构造时传入的 approve（后端传「一律拒绝」）。
         对话在副本上推进，整轮成功才写回 current.conversation：中途抛异常时对话保持原样，重发即可。
+
+        on_text 不为 None 时流式：模型每吐一段文字就调用一次，不用等整句说完。
+        多轮（中间调了工具）的文字之间会补一个 "\\n\\n"，所以把所有片段拼起来，就等于 "\\n\\n".join(answer.texts)。
         """
         conversation = [*self.current.conversation, {"role": "user", "content": user_input}]
         texts: list[str] = []
         for _ in range(self.max_tool_rounds):
-            reply = self._ask_model(conversation)
+            round_on_text = self._with_separator(on_text, needs_separator=bool(texts)) if on_text else None
+            reply = self._ask_model(conversation, round_on_text)
             texts.extend(reply.texts)
             if not reply.tool_calls:
                 self.current.conversation[:] = conversation
