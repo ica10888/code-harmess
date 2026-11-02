@@ -1,0 +1,204 @@
+# mini-harness
+
+
+**还没覆盖的**
+
+- **对话摘要**（类似 `/compact`）：目前只修剪工具结果；长对话本身的文字还会一直增长
+- **记忆的整理**：读和写都有了，但没有定期合并、删除过时笔记的机制（prompt 只要求「写之前先看有没有同主题的、写错了就改」）；
+  也没有删除工具，过时笔记只能改写或由人手动删
+- **Evaluation**：有单元测试和 live 冒烟测试，但没有衡量 agent 行为好坏的 eval（同一任务跑多次、统计通过率、对比改动前后）。
+  方案已写成 [`docs/eval-plan.md`](docs/eval-plan.md)（占位，尚未实现）
+- **沙箱**：`run_bash` 直接在本机执行，只靠人工审批。概念、接入方式、服务商全景（exe.dev、E2B、Vercel 等）和「能否用自己的 Mac mini」
+  见 [`docs/sandbox.md`](docs/sandbox.md)（尚未实现）
+- 子 agent、流式输出与中途打断
+
+## 目录
+
+```
+src/
+  step1_chat.py   第 1 步：聊天循环（还不是 agent），直接调 OpenAI 兼容 SDK
+  tools.py        四个工具 read_file / list_files / edit_file / run_bash + 手写 JSON Schema
+  providers.py    DeepSeekProvider：工具声明 / assistant 回灌 / 工具结果回灌的线上格式全收在这里
+  prompt.py       system prompt：由工作目录 / 工具集 / git 分支 / AGENTS.md / 记忆索引拼出的分段 prompt
+  agent.py        第 2–5 步：agent 循环 + 危险工具确认，--step 控制工具集
+  cli_input.py    终端输入：多行编辑、方向键、历史、斜杠命令补全（prompt_toolkit）
+  skills.py       Skill：发现 SKILL.md、解析 frontmatter、生成索引（Agent Skills 标准）
+  personas.py     Persona：读 .agents/personas/<名字>.md（frontmatter + 中文正文），一个角色一套提示词和工具
+tests/            pytest：快速测试全用 fake；test_live.py 打真实 API（默认跳过，-m live 运行）
+AGENTS.md         给 agent 看的项目说明（命令、架构、约定、踩过的坑）
+CLAUDE.md         只有一行 `@AGENTS.md`：Claude Code 读 CLAUDE.md，靠这个 import 读到同一份说明
+.env.example      环境变量示例；复制成 .env 再填 key（.env 已在 .gitignore，不会提交）
+.agents/skills/   项目级 skill（通用约定的位置，不绑定某个 agent），自带示例 run-checks
+.agents/personas/ 角色：唐僧 tang（策划）、孙悟空 wukong（程序员）、猪八戒 bajie（只读检查员）
+Memory/           跨会话记忆：普通 Markdown 笔记，启动时列成索引（已在 .gitignore，只留本地）
+rh-learn-python/  《拆机学 Python》：用这台机器人学 Python 的 15 节互动课（浏览器打开 index.html）
+rh-learn-agent-harness/  《拆机学 Harness》：Harness 工程系列（规划中），目前第 01 课「西游记三人组」
+```
+
+## 准备
+
+```bash
+cp .env.example .env && chmod 600 .env   # 再把 DEEPSEEK_API_KEY 换成你的 key（https://platform.deepseek.com）
+uv sync
+```
+
+下面所有命令都用 `uv run --env-file .env` 让 uv 把 `.env` 注入环境；
+如果你已经 `export DEEPSEEK_API_KEY=...`，去掉 `--env-file .env` 即可。
+
+## 五步
+
+```bash
+uv run --env-file .env src/step1_chat.py        # 第 1 步：连问两轮，第二轮引用第一轮 → 它"记得"
+uv run --env-file .env src/agent.py --step 2    # 第 2 步：+ read_file    → 「帮我解开 secret.txt 里的谜题」
+uv run --env-file .env src/agent.py --step 3    # 第 3 步：+ list_files   → 「这个目录里的 Python 文件都在干什么？」
+uv run --env-file .env src/agent.py --step 4    # 第 4 步：+ edit_file    → 「建一个 fizzbuzz.js，能用 node 跑」
+uv run --env-file .env src/agent.py             # 第 5 步（默认）：+ run_bash → 「解 input/math.txt 的题，用 python 验算」
+```
+
+Ctrl-D 退出。工具调用会以绿色 `tool:` 行打印，失败以红色 `→ error` 打印并回灌给模型。
+
+输入框支持多行编辑：
+
+| 按键 | 作用 |
+|---|---|
+| Enter | 发送 |
+| Shift+Enter / Option+Enter | 换行（Shift+Enter 要终端能区分它，见下） |
+| Ctrl+J，或行尾 `\` 再 Enter | 换行（任何终端都能用） |
+| ← → ↑ ↓ | 移动光标；在第一行按 ↑、最后一行按 ↓ 翻本会话的历史 |
+| Ctrl+C / Ctrl+D | 清空这一行 / 空行时退出 |
+| `/exit`、`/quit` | 退出本会话和程序 |
+| `/skill名 [参数]` | 主动调用一个 skill（把它的 SKILL.md 和参数一起发给模型） |
+| `/persona [名字]`、`/prompt`、`/tools`、`/status` | 角色和查看命令，见下面「角色（persona）」 |
+| 输入 `/` | 弹出命令菜单（带说明），继续输入按前缀筛选；Tab 或 ↑↓ 选中，Enter 发送 |
+
+很多终端默认让 Shift+Enter 和 Enter 发一样的字符，程序分不出来。能分出来的终端（kitty、WezTerm、Ghostty，
+iTerm2 开了「Report modifiers using CSI u」）会发转义序列，`cli_input.py` 识别常见的两种格式。
+粘贴多行文本不会被中途提交。输入来自管道（`printf ... | uv run src/agent.py`）时退回普通的逐行读取。
+
+`run_bash` 每条命令执行前都会问 `允许执行? [Y/n/a]`：**回车或 `y` 允许这一次**，`n` 拒绝（作为错误回灌给模型），
+`a` 本会话内不再询问 `run_bash`；Ctrl-D 视为拒绝，输错会再问一次。
+命令 30 秒超时（连子进程一起杀），输出超过 10000 字符截断。
+
+## 角色（persona）
+
+同一个模型，换一套 harness 配置，就是另一个 agent。角色放在 `.agents/personas/<名字>.md`：
+
+```markdown
+---
+name: bajie                      # 名字：/persona bajie 用它（小写字母、数字、连字符）
+title: 猪八戒                    # 展示名，可选
+description: 检查员：对照 PLAN.md 挑毛病，只看不改
+emoji: 🐷                        # 可选
+tools: read_file, list_files     # 逗号分隔一行；不写就是纯聊天
+---
+你是猪八戒……（中文正文：替换 system prompt 的第一句，其余段落仍按工具自动拼出来）
+```
+
+```bash
+uv run --env-file .env src/agent.py                   # 从内置的 default 开始，进去后 /persona wukong 切换
+uv run --env-file .env src/agent.py --persona tang    # 直接从唐僧开始
+```
+
+| 命令 | 作用 |
+|---|---|
+| `/persona` | 列出所有角色，`→` 是当前的 |
+| `/persona <名字>` | 切换，并打印换掉了什么（工具增减、提示词长度和段落、对话条数、记忆目录） |
+| `/persona reload` | 改完 `.md` 后重新读，换掉提示词和工具，**保留对话**；文件改坏时继续用原来的配置 |
+| `/prompt` | 当前角色完整的 system prompt |
+| `/tools` | 当前角色的工具和一行中文说明；`/tools <名字>` 看发给模型的英文说明和参数 |
+| `/status` | 一屏看：角色、模型（所有角色共用）、工具、提示词、对话、上一次输入 token、记忆 |
+
+切换角色时会换的：system prompt、工具、对话、审批状态（「a=本会话都允许」不带过去）、记忆目录（`<记忆目录>/<名字>/`，默认 `Memory/<名字>/`）。
+不换的：模型，以及工作目录里的文件——角色之间靠文件交接（比如唐僧写的 `PLAN.md`）。
+设计和教学场景见 [`docs/persona-design.md`](docs/persona-design.md)。
+
+## 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | （必填） | DeepSeek key，放 `.env`（照 `.env.example`）或 export |
+| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 可换 `deepseek-v4-pro` |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | 一般不用改 |
+| `MINI_HARNESS_SKILL_DIRS` | （不设 = 只用 `.agents/skills/`） | 额外的 skill，`:` 分隔；每项可以是 skill 集合目录（如用户级的 `~/.agents/skills`），也可以是单个 skill |
+| `MINI_HARNESS_MEMORY_DIR` | `Memory` | 记忆笔记目录，相对路径按工作目录解析：默认即 `<项目>/Memory`（已在 `.gitignore`，只留本地）。目录不存在就不加载 |
+
+DeepSeek 默认开思考模式；代码里 `reasoning_effort="low"`，改 `providers.py` 里的构造参数即可调。
+
+## 与 PDF 代码清单的差异
+
+PDF 用的是 Anthropic SDK；本仓库换成 DeepSeek 的 OpenAI 兼容协议，线上格式有四处不同，全部收在 `providers.py`：
+
+| 点 | PDF（Anthropic 协议） | 本仓库（DeepSeek / OpenAI 兼容协议） |
+|---|---|---|
+| 工具声明 | `{name, description, input_schema}` | `{"type":"function","function":{name, description, parameters}}`；`Tool` 本身不知道哪家 API |
+| assistant 回灌 | `message.content` 块列表原样回灌 | `content + tool_calls + reasoning_content`（思考模式带 tools 时必须回灌） |
+| 工具结果回灌 | 一条 user 消息，内含多个 `tool_result` 块，带 `is_error` | 每个结果一条 `role=tool` 消息；没有 `is_error`，用 `Error:` 前缀 |
+| 模型 | `claude-sonnet-5` | `deepseek-v4-flash`（`DEEPSEEK_MODEL` 可换） |
+
+循环的形状（`need_user_input` 那个布尔量）、三个工具的语义、`list_files` 的剪枝，全部与 PDF 一致。
+
+在原文之上加的东西：
+
+- **动态 system prompt**（`prompt.py`）：`build_system_prompt(PromptContext)` 是纯函数，按运行时状态拼出
+  `# Agency` / `# Guardrails` / `# Verification` / `# Project Instructions` 各段——哪些段出现取决于挂了哪些工具
+  （`--step 2` 只有 `read_file`，就不谈编辑和验证）。请求时拼成最前面一条 `role=system` 消息，不存进 conversation。
+- **`AGENTS.md`**：启动时若工作目录里有这个文件，就注入为 `# Project Instructions`（超过 20000 字符截断）。
+- **记忆索引**：启动时把 `Memory/`（或 `MINI_HARNESS_MEMORY_DIR` 指定的目录）下最近 20 篇 `.md`（按修改时间，最多 3000 字符）
+  列成 `# Memory` 段，每条「日期 标题 — 路径」，**只有索引不含正文**，并标明「可能过时、先读原文再依赖」。
+  只在启动时读一次，会话中途不重建 system prompt，保住前缀缓存。记忆本身不进仓库；就是普通 Markdown 文件，不依赖任何第三方记忆工具。
+- **记忆写入**：有 `edit_file` 时，`# Memory` 段还带写入规则（**没有任何笔记时也出现**，否则第一篇永远写不出来）：
+  用户说「记住」、或得出以后仍然成立的结论时写一篇；一个主题一个文件 `Memory/<slug>.md`，首行 `# 标题`（索引只显示这行）+ `Date:`；
+  同主题已有笔记就更新而不是重复建；**不存任务进度、待办清单**（课程 9.1：跨会话的清单会变成陈旧的垃圾抽屉）、
+  **不存机密**；**不存代码**（可复用的脚本应做成 skill，笔记里只写「用哪个、为什么」）；
+  全体贡献者都该遵守的规则建议写进 AGENTS.md（课程 3.4）。不需要新工具。
+  实测：让它记住「发布口令」，它按规则拒绝保存，只提议记「口令存在哪」。
+  harness 是通用的，项目自己的命令和约定由项目自己说；本仓库也带了一份。
+- **`edit_file` 更严**：`old_str` 必须唯一命中；空 `old_str` 不会覆盖非空的已有文件。
+- **坏参数不崩溃**：模型给的工具参数不是合法 JSON 对象时，作为错误结果回灌，而不是让程序退出。
+- **二进制文件不崩溃**：`read_file` / `edit_file` 读到非 UTF-8 文件（图片、PDF）时作为错误结果回灌。
+- **工具调用上限**：同一次用户输入后最多连续 20 轮工具调用（`--max-rounds N` 可调），
+  到了就暂停交回给你，回复「继续」接着做——防止模型原地打转烧 token。
+- **技能（skills）**（参考 Vercel 课程 11.1，遵循 [Agent Skills](https://agentskills.io) 标准）：
+  默认只扫描项目内的 `.agents/skills/`——Amp、Cline、Warp、Zed 等和 Vercel `skills` CLI 共用的通用位置，
+  不读 Claude Code 专用的 `.claude/skills`，所以 mini-harness 不依赖任何特定 agent；`MINI_HARNESS_SKILL_DIRS` 显式追加。
+  SKILL.md 里引用自己的文件一律用**相对 skill 根目录的路径**（`scripts/quote.py`），这是标准的要求，skill 放哪都能用。三层渐进式披露：
+  ① 启动时每个 skill 一行进 `# Skills` 索引；② 模型判断要用时 `read_file` 读 SKILL.md；③ 按 SKILL.md 跑 `scripts/`。
+  **没有新工具**。`/skill名` 主动调用时，SKILL.md 正文和参数作为一条 user 消息发给模型。
+  认得 Claude Code 的调用开关：`disable-model-invocation: true` 不进索引（只能 `/` 调用），`user-invocable: false` 不进 `/` 菜单；
+  `allowed-tools` 的免确认授权**故意不支持**（skill 是外部文本，不能给自己开绿灯）。frontmatter 自己解析、不依赖 PyYAML，
+  用本机 58 个真实 skill 和 PyYAML 逐个对照零差异。为别的 agent 写的 skill 若依赖 `Agent`、`WebFetch` 等工具，这里用不了。
+- **Python 一律经 uv 运行**：system prompt 要求用 `uv run <脚本>` 而不是系统 `python3`；自己写的脚本用
+  PEP 723 内联声明依赖（`# /// script` 块，没有依赖也写 `dependencies = []`），uv 会给它单独的隔离环境，
+  不借用所在项目的 `.venv`。skill 的脚本若没有声明、又缺包，用 `uv run --with <包>` 补上，**绝不伪造替代品**
+  （实测踩过：模型为了让校验「通过」自己写了个假的 `yaml.py`）。
+- **斜杠命令**：以 `/命令` 开头的输入由 harness 处理、不发给模型，目前有 `/exit`、`/quit`；未知命令列出可用的。
+  输入框开头敲 `/` 会弹出补全菜单（`SlashCommandCompleter`，命令表由 `agent.py` 传入，避免循环引用）。
+  只有第一个词整个是 `/字母...` 才算命令，所以 `/Users/me/a.py 看看这个` 这种以路径开头的消息照常发给模型。
+- **多行输入**（`cli_input.py`，基于 `prompt_toolkit`）：Shift+Enter / Option+Enter / Ctrl+J / 行尾 `\` 换行，
+  方向键编辑和翻历史；测试用 prompt_toolkit 的管道输入直接喂 Shift+Enter 的转义序列。
+- **终端渲染 Markdown**：模型回复用 `rich` 渲染；system prompt 的 `# Communication` 段告诉模型
+  「输出会按 Markdown 渲染在一个窄终端里」，让它用列表、代码块，少用宽表格和 HTML。
+- **上下文管理**（参考 Vercel 课程模块 5）：
+  1. 遥测：每次调用后 stderr 一行 `· in 4,210 (cached 3,800) · out 120`
+  2. 有界输出：`read_file` 每次最多 500 行（`offset` / `limit` 分页），`list_files` 最多 500 项，
+     `run_bash` 保留最后 1 万字符（报错在结尾）；截断都会告诉模型还剩多少
+  3. 修剪：上次输入超过 6 万 token 时，把最近 5 个之外的旧工具结果**一次性**换成占位符。
+     不每轮滑动修剪，因为 DeepSeek 按前缀自动缓存，改一条旧消息其后缓存全失效。
+     实测：预算要明显大于「保留的结果」本身，否则退化成每轮修剪；保留太少，模型会把清掉的文件重新读一遍。
+- **`run_bash` + 确认**：`Tool.needs_approval=True` 的工具执行前由 agent 询问用户 `[Y/n/a]`；
+  「本会话都允许」的状态存在 `ConsoleApprover` 对象里，每个会话一个，Agent 只看 `approve(call) -> bool`。
+
+## 测试
+
+```bash
+uv run pytest                                  # 快速测试，全用 fake，不打真实 API
+uvx ruff check src tests && uvx ruff format --check src tests
+uv run --env-file .env pytest -m live         # live 冒烟测试：打真实 DeepSeek API，要 key、要花钱
+```
+
+`tests/test_live.py` 里是 fake 证明不了的东西：DeepSeek 接不接受我们的消息顺序（暂停后接「继续」、修剪后的 conversation），
+以及模型会不会照 prompt 行事（翻页、被拒后不重试、用 AGENTS.md 回答）。默认跳过，没 key 时自动 skip；
+改了 provider / prompt / 工具描述 / 修剪之后手动跑一次。
+
+每次 push 到 `main` 和每个 PR，GitHub Actions 会在干净的 Ubuntu 上自动跑同样的检查（`.github/workflows/ci.yml`）。
+测试不打真实 API，所以 CI 不需要 API key。

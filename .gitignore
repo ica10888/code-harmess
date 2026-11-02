@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.ruff_cache/
+# 个人记忆放在项目下的 Memory/（MINI_HARNESS_MEMORY_DIR 默认值），只留在本地，不进仓库
+Memory/
+memory/
+# macOS Finder 自动生成的文件夹显示设置，与项目无关
+.DS_Store
+# Django 开发库、前端依赖和构建产物
+backend/db.sqlite3
+node_modules/
+frontend/dist/
+# 含真实 DeepSeek key；模板是 backend/config.ini.example
+backend/config.ini

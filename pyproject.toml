@@ -1,0 +1,26 @@
+[project]
+name = "mini-harness"
+version = "0.1.0"
+description = "跟学 Thorsten Ball《How to Build an Agent》的 Python 实现（四步递进），默认 Provider 为 DeepSeek"
+requires-python = ">=3.12"
+dependencies = [
+    "openai>=1.0",
+    "prompt-toolkit>=3.0.53",
+    "rich>=15.0.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["backend/core/src"]
+testpaths = ["backend/core/tests"]
+markers = ["live: 调用真实 DeepSeek API（要 DEEPSEEK_API_KEY、要花钱），默认跳过；用 -m live 运行"]
+# 默认不跑 live；命令行的 -m live 会覆盖这里。--strict-markers：标记拼错（如 lvie）直接报错，免得混进 CI
+addopts = "-m 'not live' --strict-markers"
+
+[tool.ruff]
+line-length = 120
