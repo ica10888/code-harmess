@@ -1,13 +1,19 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { createSession, listMessages, listSessions, openStream, streamMessage } from '../api'
+import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
+import FileUploadButton from '../components/FileUploadButton.vue'
+import MarkdownPreview from '../components/MarkdownPreview.vue'
+import { sendWithAttachment } from '../utils/sendFlow'
 import { createTypewriter } from '../utils/typewriter'
+import { formatSize, uploadErrorMessage } from '../utils/upload'
 
 const sessions = ref([])
 const currentId = ref(null)
 const messages = ref([])
 const draft = ref('')
+const pendingFile = ref(null) // 已选好、还没上传的文件；点「发送」时才上传
+const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const sending = ref(false)
 const listEl = ref(null)
 
@@ -34,6 +40,7 @@ function addMessages(incoming) {
 async function selectSession(id) {
   if (closeStream) closeStream()
   currentId.value = id
+  pendingFile.value = null // 选好还没传的文件属于原来的会话，不能带到新会话里
   messages.value = []
   addMessages(await listMessages(id))
   const last = messages.value.length ? messages.value[messages.value.length - 1].id : 0
@@ -48,9 +55,47 @@ async function newSession() {
 
 async function send() {
   const content = draft.value.trim()
-  if (!content || !currentId.value || sending.value) return
+  const attachment = pendingFile.value
+  // 有文件时，没有文字也能发（只上传）；两样都没有就不动
+  if ((!content && !attachment) || !currentId.value || sending.value) return
   sending.value = true
-  draft.value = ''
+  try {
+    // 先上传文件，await 它结束，才发送文本——sendWithAttachment 保证这个先后顺序，上传失败就不会发文本
+    const { uploaded } = await sendWithAttachment({
+      file: attachment,
+      text: content,
+      upload: (file) => {
+        stage.value = '上传文件中…'
+        return uploadFile(currentId.value, file)
+      },
+      send: (text) => {
+        stage.value = ''
+        return streamReply(text)
+      },
+    })
+    if (uploaded) {
+      const renamed = uploaded.name !== attachment.name ? `（重名，已存为 ${uploaded.name}）` : ''
+      ElMessage.success(`已上传 ${uploaded.name}，${formatSize(uploaded.size)}${renamed}`)
+    }
+    // 成功才清空；失败时保留文字和文件，用户可以直接重试
+    draft.value = ''
+    pendingFile.value = null
+  } catch (e) {
+    if (e.stage === 'upload') {
+      ElMessage.error(`文件上传失败，文本未发送：${uploadErrorMessage(e.cause)}`)
+    } else {
+      // 发送阶段失败：文件其实已经传上去了，别让用户重传，只需重发文字
+      if (attachment) pendingFile.value = null
+      ElMessage.error(attachment ? '文件已上传，但消息发送失败，请重试' : '发送失败，请重试')
+    }
+  } finally {
+    stage.value = ''
+    sending.value = false
+  }
+}
+
+// 发送文本并把回复一段段显示出来。出错时往外抛，由 send() 统一提示；这里负责清理半截的临时消息。
+async function streamReply(content) {
   // 正在长出来的回复：先用一条临时消息（id 取 Infinity，排在最后），done 到来时换成存好的真消息。
   // live 必须是 messages.value 里取回的响应式代理：改 push 之前的原对象，Vue 看不到，界面不会刷新。
   let live = null
@@ -83,13 +128,9 @@ async function send() {
         addMessages([m])
       },
     })
-  } catch {
-    // 流中途断了：去掉半截的临时消息，把没发成功的话放回输入框；已存的消息以服务器为准，刷新就能看到
-    dropLive()
-    draft.value = content
-    ElMessage.error('发送失败，请重试')
-  } finally {
-    sending.value = false
+  } catch (e) {
+    dropLive() // 流中途断了：去掉半截的临时消息；已存的消息以服务器为准，刷新就能看到
+    throw e
   }
 }
 
@@ -126,15 +167,27 @@ onBeforeUnmount(() => closeStream && closeStream())
       </div>
 
       <div class="composer">
+        <MarkdownPreview :text="draft" />
         <el-input
           v-model="draft"
           type="textarea"
           :rows="3"
           resize="none"
-          placeholder="输入内容，Ctrl+Enter 发送"
+          placeholder="支持 Markdown，Ctrl+Enter 发送"
           @keydown.ctrl.enter.prevent="send"
         />
-        <el-button type="primary" :loading="sending" :disabled="!draft.trim()" @click="send">发送</el-button>
+        <!-- 文本框下方一排：左边选文件，右边发送；两个按钮同高，左右两端对齐 -->
+        <div class="actions">
+          <FileUploadButton v-model="pendingFile" :disabled="sending" />
+          <el-button
+            type="primary"
+            :loading="sending"
+            :disabled="!draft.trim() && !pendingFile"
+            @click="send"
+          >
+            {{ stage || '发送' }}
+          </el-button>
+        </div>
       </div>
     </main>
   </div>
@@ -214,12 +267,15 @@ onBeforeUnmount(() => closeStream && closeStream())
 }
 .composer {
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid #e4e7ed;
 }
-.composer .el-textarea {
-  flex: 1;
+/* 按钮一排：左边上传、右边发送，垂直居中，所以两个同高的按钮上下对齐 */
+.composer .actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 </style>

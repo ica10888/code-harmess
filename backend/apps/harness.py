@@ -17,7 +17,7 @@ from django.conf import settings
 from agent import DEFAULT_SESSION, Agent  # noqa: E402
 from prompt import PromptContext, build_system_prompt  # noqa: E402
 from providers import DeepSeekProvider  # noqa: E402
-from tools import ALL_TOOLS  # noqa: E402
+from tools import workspace_tools  # noqa: E402
 
 EMPTY_REPLY = "（模型没有返回文字）"
 PAUSED_NOTICE = "已连续 {rounds} 轮工具调用，先暂停；回复「继续」让我接着做。"
@@ -39,34 +39,46 @@ def get_provider():
     return _provider
 
 
-def _web_role():
+def _web_role(can_edit: bool):
     """网页聊天里的角色说明。要写明真实模型：core 的默认提示词是「coding agent」，
     模型拿它自我介绍时会自称 Claude；说清楚它是谁，它才不会冒充别家。"""
-    return (
+    role = (
         "You are a coding assistant inside a web chat page. The user types in a text box and reads your replies there.\n"
         f"You are powered by DeepSeek (model: {settings.DEEPSEEK_MODEL}). If asked what model you are or who made you, "
-        "say so; never claim to be Claude, GPT or any other model."
+        "say so; never claim to be Claude, GPT or any other model.\n"
+        "Your tools work inside a private workspace folder that belongs to this conversation. "
+        "Always use paths relative to the workspace (e.g. `notes/a.txt`, never absolute paths or `..`)."
     )
+    if can_edit:  # 只读模式下没有这个工具，就别提，免得模型想去调
+        role += " The workspace starts empty: files you create are kept there and you can list and read them later."
+    return role
 
 
-def _agent(conversation: list[dict]) -> Agent:
+def workspace_dir(session) -> str:
+    """这个会话的工作区：<存储路径>/input/<会话id>/file。工具第一次用到时才会创建它。"""
+    return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "file")
+
+
+def _agent(session) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 
-    网页里没人能点「允许」，所以 approve 一律拒绝：需要审批的工具（run_bash）即使加进 HARNESS_TOOLS 也跑不起来。
+    读写文件的工具被限制在这个会话自己的工作区里（tools.workspace_tools），模型碰不到别的会话和项目文件。
+    run_bash 不提供：它能跑任意命令，限制不住目录；网页里也没人能点「允许」，approve 一律拒绝作为兜底。
     get_user_input 不会被用到（respond 不读输入），传个返回 None 的占位，免得它去建终端输入框。
     """
-    tools = [t for t in ALL_TOOLS if t.name in settings.HARNESS_TOOLS]
+    allowed = [t for t in workspace_tools(workspace_dir(session)) if t.name in settings.HARNESS_TOOLS]
     system = build_system_prompt(
         PromptContext(
-            working_directory=os.getcwd(),
-            tool_names=[t.name for t in tools],
+            # 不给模型真实的服务器路径；它看到的工作目录就叫 workspace，所有路径相对于它
+            working_directory="workspace",
+            tool_names=[t.name for t in allowed],
             today=datetime.now().astimezone().date().isoformat(),
-            persona=_web_role(),
+            persona=_web_role(can_edit=any(t.name == "edit_file" for t in allowed)),
         )
     )
     agent = Agent(
         get_provider(),
-        tools,
+        allowed,
         get_user_input=lambda: None,
         system=system,
         approve=lambda call: False,
@@ -74,7 +86,7 @@ def _agent(conversation: list[dict]) -> Agent:
         context_budget=settings.HARNESS_CONTEXT_BUDGET,
         keep_tool_results=settings.HARNESS_KEEP_TOOL_RESULTS,
     )
-    agent.sessions[DEFAULT_SESSION].conversation[:] = conversation
+    agent.sessions[DEFAULT_SESSION].conversation[:] = session.conversation
     return agent
 
 
@@ -91,7 +103,7 @@ def run_turn(session, user_text: str) -> str:
 
     Agent.respond 在副本上推进对话，整轮成功才写回；中途抛异常时对话原样不动，所以这里也只在成功后才保存。
     """
-    agent = _agent(session.conversation)
+    agent = _agent(session)
     return _finish(session, agent, agent.respond(user_text))
 
 
@@ -104,7 +116,7 @@ def stream_turn(session, user_text: str):
     """
     pieces: queue.Queue = queue.Queue()
     outcome: dict = {}
-    agent = _agent(session.conversation)
+    agent = _agent(session)
 
     def work():
         try:

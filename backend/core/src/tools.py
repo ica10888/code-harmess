@@ -17,7 +17,7 @@ import os
 import signal
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 
@@ -273,3 +273,36 @@ run_bash = Tool(
 
 
 ALL_TOOLS = [read_file, list_files, edit_file, run_bash]
+
+
+# --- 工作区：把读写限制在一个目录里 ----------------------------------------------
+
+
+def _resolve_in(root: str, path: str) -> str:
+    """把模型给的相对路径解析到 root 里面；绝对路径、跳出 root 的路径（.. 或符号链接）都拒绝。"""
+    if os.path.isabs(path):
+        raise ToolError(f"path must be relative to the workspace, got {path!r}")
+    # realpath 会顺着符号链接走到真实位置，所以指向 root 外面的链接也逃不出去
+    real_root = os.path.realpath(root)
+    full = os.path.realpath(os.path.join(real_root, path))
+    if full != real_root and not full.startswith(real_root + os.sep):
+        raise ToolError(f"path {path!r} is outside the workspace")
+    return full
+
+
+def workspace_tools(root: str) -> list[Tool]:
+    """read_file / list_files / edit_file 的工作区版：路径都相对于 root，碰不到 root 以外的任何东西。
+
+    只换路径，不动原工具的逻辑（分页、截断、唯一匹配……全部沿用）。root 第一次用到时才创建。
+    没有 run_bash：它能跑任意命令，限制不住路径。
+    """
+
+    def scoped(tool: Tool, key: str, default: str = ".") -> Tool:
+        def run(args: dict[str, Any]) -> str:
+            os.makedirs(root, exist_ok=True)
+            path = args.get(key) or default
+            return tool.run({**args, key: _resolve_in(root, path)})
+
+        return replace(tool, run=run)
+
+    return [scoped(read_file, "path"), scoped(list_files, "path"), scoped(edit_file, "path")]

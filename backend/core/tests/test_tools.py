@@ -1,6 +1,7 @@
 """工具层测试：只通过 Tool.run() 这个公共接口验证行为。"""
 
 import json
+import os
 import time
 
 import pytest
@@ -223,3 +224,122 @@ def test_run_bash_keeps_tail_of_long_output(monkeypatch):
     out = run_bash.run({"command": "printf 'HEAD%0100dTAIL' 0"})
     assert out.endswith("TAIL") and "HEAD" not in out
     assert "showing last 10 of 108 chars" in out
+
+
+# --- workspace_tools：把读写限制在一个目录里（后端按会话各给一个）-------------------------------
+
+
+def _ws(tmp_path):
+    return {t.name: t for t in tools.workspace_tools(str(tmp_path / "ws"))}
+
+
+def test_workspace_tools_keep_the_names_schemas_and_order_of_the_originals(tmp_path):
+    ws = tools.workspace_tools(str(tmp_path))
+    assert [t.name for t in ws] == ["read_file", "list_files", "edit_file"]
+    for t in ws:
+        original = next(o for o in ALL_TOOLS if o.name == t.name)
+        assert (t.description, t.input_schema, t.needs_approval) == (
+            original.description,
+            original.input_schema,
+            original.needs_approval,
+        )
+
+
+def test_workspace_directory_is_created_on_first_use(tmp_path):
+    root = tmp_path / "input" / "sid" / "file"
+    assert not root.exists()
+
+    listing = {t.name: t for t in tools.workspace_tools(str(root))}["list_files"].run({})
+
+    assert root.is_dir() and json.loads(listing) == []
+
+
+def test_edit_file_creates_files_inside_the_workspace_and_read_and_list_see_them(tmp_path):
+    ws = _ws(tmp_path)
+
+    assert "Successfully created" in ws["edit_file"].run({"path": "notes/a.txt", "old_str": "", "new_str": "hello"})
+
+    assert (tmp_path / "ws" / "notes" / "a.txt").read_text(encoding="utf-8") == "hello"
+    assert "hello" in ws["read_file"].run({"path": "notes/a.txt"})
+    assert json.loads(ws["list_files"].run({})) == ["notes/", os.path.join("notes", "a.txt")]
+    assert not (tmp_path / "a.txt").exists()  # 没有写到别处
+
+
+def test_edit_file_can_modify_an_existing_workspace_file(tmp_path):
+    ws = _ws(tmp_path)
+    ws["edit_file"].run({"path": "a.txt", "old_str": "", "new_str": "one two"})
+
+    assert ws["edit_file"].run({"path": "a.txt", "old_str": "two", "new_str": "2"}) == "OK"
+
+    assert (tmp_path / "ws" / "a.txt").read_text(encoding="utf-8") == "one 2"
+
+
+def test_list_files_subpath_is_relative_to_the_workspace(tmp_path):
+    ws = _ws(tmp_path)
+    ws["edit_file"].run({"path": "d/x.txt", "old_str": "", "new_str": "x"})
+
+    assert json.loads(ws["list_files"].run({"path": "d"})) == ["x.txt"]
+
+
+@pytest.mark.parametrize("tool, args", [
+    ("read_file", {"path": "../secret.txt"}),
+    ("list_files", {"path": ".."}),
+    ("edit_file", {"path": "../evil.txt", "old_str": "", "new_str": "x"}),
+    ("edit_file", {"path": "a/../../evil.txt", "old_str": "", "new_str": "x"}),
+])
+def test_paths_that_climb_out_of_the_workspace_are_refused(tmp_path, tool, args):
+    (tmp_path / "secret.txt").write_text("top secret", encoding="utf-8")
+    ws = _ws(tmp_path)
+
+    with pytest.raises(ToolError, match="outside the workspace"):
+        ws[tool].run(args)
+
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_absolute_paths_are_refused_even_when_they_point_inside_the_workspace(tmp_path):
+    ws = _ws(tmp_path)
+    ws["edit_file"].run({"path": "a.txt", "old_str": "", "new_str": "x"})
+    inside = str(tmp_path / "ws" / "a.txt")
+
+    for tool, args in [("read_file", {"path": inside}), ("list_files", {"path": inside})]:
+        with pytest.raises(ToolError, match="relative"):
+            ws[tool].run(args)
+
+
+def test_a_symlink_pointing_out_of_the_workspace_cannot_be_followed(tmp_path):
+    (tmp_path / "secret.txt").write_text("top secret", encoding="utf-8")
+    ws = _ws(tmp_path)
+    ws["list_files"].run({})  # 建出工作区
+    try:
+        (tmp_path / "ws" / "link.txt").symlink_to(tmp_path / "secret.txt")
+    except OSError:
+        pytest.skip("this platform cannot create symlinks without privileges")
+
+    with pytest.raises(ToolError, match="outside the workspace"):
+        ws["read_file"].run({"path": "link.txt"})
+
+
+def test_workspaces_do_not_see_each_other(tmp_path):
+    a = {t.name: t for t in tools.workspace_tools(str(tmp_path / "a"))}
+    b = {t.name: t for t in tools.workspace_tools(str(tmp_path / "b"))}
+    a["edit_file"].run({"path": "mine.txt", "old_str": "", "new_str": "x"})
+
+    assert json.loads(b["list_files"].run({})) == []
+    with pytest.raises(ToolError):
+        b["read_file"].run({"path": "mine.txt"})
+
+
+def test_errors_from_the_original_tools_still_come_back_as_tool_errors(tmp_path):
+    ws = _ws(tmp_path)
+    with pytest.raises(ToolError):
+        ws["read_file"].run({"path": "missing.txt"})
+    with pytest.raises(ToolError, match="must differ"):
+        ws["edit_file"].run({"path": "a.txt", "old_str": "x", "new_str": "x"})
+
+
+def test_the_original_tools_still_work_on_the_current_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    edit_file.run({"path": "plain.txt", "old_str": "", "new_str": "x"})
+
+    assert (tmp_path / "plain.txt").exists()  # core 终端版的用法没变

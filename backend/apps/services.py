@@ -1,5 +1,9 @@
 """业务层：视图只管 HTTP，真正的逻辑放这里。"""
 
+from pathlib import Path
+
+from django.conf import settings
+
 from . import harness
 from .models import ChatSession, Message
 from .serializers import MessageSerializer
@@ -51,3 +55,46 @@ def stream_user_message(session: ChatSession, user_text: str):
     except Exception as e:
         reply = f"调用模型失败：{e}"
     yield "done", MessageSerializer(Message.objects.create(session=session, role="assistant", content=reply)).data
+
+
+class UploadError(Exception):
+    """上传不合格。status 是要返回给前端的 HTTP 状态码。"""
+
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _safe_file_name(raw: str) -> str:
+    """只保留文件名本身：去掉任何目录部分（/ 和 \ 都算），拒绝 '' '.' '..'。
+
+    浏览器一般只传文件名，但请求可以手写，../../x 这种不能让它写到工作区外面。
+    """
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if name in ("", ".", ".."):
+        raise UploadError("文件名不合法")
+    return name
+
+
+def _free_name(directory: Path, name: str) -> str:
+    """重名时在扩展名前加 (1)、(2)……，绝不覆盖已有文件（里面可能有模型写的东西）。"""
+    path = Path(name)
+    candidate, n = name, 0
+    while (directory / candidate).exists():
+        n += 1
+        candidate = f"{path.stem} ({n}){path.suffix}"
+    return candidate
+
+
+def save_upload(session: ChatSession, uploaded) -> dict:
+    """把上传的文件存进这个会话的工作区（和模型的文件工具是同一个目录），返回 {"name", "size"}。"""
+    if uploaded.size > settings.HARNESS_MAX_UPLOAD_BYTES:
+        raise UploadError(f"文件太大，最大 {settings.HARNESS_MAX_UPLOAD_BYTES // (1024 * 1024)} MB", status=413)
+    name = _safe_file_name(uploaded.name or "")
+    directory = Path(harness.workspace_dir(session))
+    directory.mkdir(parents=True, exist_ok=True)
+    name = _free_name(directory, name)
+    with open(directory / name, "xb") as f:  # x：万一并发下撞了名，报错而不是覆盖
+        for chunk in uploaded.chunks():
+            f.write(chunk)
+    return {"name": name, "size": uploaded.size}

@@ -63,6 +63,11 @@ DEEPSEEK_API_KEY = config.get("deepseek", "api_key", fallback="")
 DEEPSEEK_MODEL = config.get("deepseek", "model", fallback="deepseek-v4-flash")
 DEEPSEEK_BASE_URL = config.get("deepseek", "base_url", fallback="https://api.deepseek.com")
 
+# 存储路径：每个会话的文件放在 <HARNESS_STORAGE_DIR>/input/<会话id>/file/（读自 config.ini 的 [storage]）
+HARNESS_STORAGE_DIR = str((BASE_DIR / config.get("storage", "dir", fallback="storage")).resolve())
+# 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
+HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024
+
 # Harness：网页里没人能点「允许」，所以默认只给只读工具；run_bash 这类要审批的工具即使加进来也会被拒绝
 HARNESS_TOOLS = ["read_file", "list_files"]
 HARNESS_MAX_TOOL_ROUNDS = 20  # 一句话之后最多连续几轮工具调用

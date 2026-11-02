@@ -5,6 +5,7 @@ import time
 
 from django.http import Http404, StreamingHttpResponse
 from rest_framework import status
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -93,3 +94,19 @@ class StreamView(APIView):
         response["Cache-Control"] = "no-cache"
         response["X-Accel-Buffering"] = "no"
         return response
+
+
+class FileUploadView(APIView):
+    """上传一个文件到这个会话的工作区（<存储路径>/input/<会话id>/file/）。表单字段名 file。"""
+
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, session_id):
+        session = get_own_session(request, session_id)
+        uploaded = request.FILES.get("file")
+        if uploaded is None:
+            return Response({"detail": "请选择要上传的文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response(services.save_upload(session, uploaded), status=status.HTTP_201_CREATED)
+        except services.UploadError as e:
+            return Response({"detail": str(e)}, status=e.status)

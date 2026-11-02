@@ -51,3 +51,14 @@ export async function streamMessage(sessionId, content, handlers) {
     }
   }
 }
+
+/** 上传一个文件到当前会话的工作区；onProgress(0~100) 报告进度。返回 {name, size}（重名时 name 会被改成 "a (1).txt"）。 */
+export const uploadFile = (sessionId, file, onProgress) => {
+  const form = new FormData()
+  form.append('file', file)
+  return http
+    .post(`/sessions/${sessionId}/files/`, form, {
+      onUploadProgress: (e) => e.total && onProgress?.(Math.round((e.loaded / e.total) * 100)),
+    })
+    .then((r) => r.data)
+}

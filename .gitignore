@@ -14,3 +14,5 @@ node_modules/
 frontend/dist/
 # 含真实 DeepSeek key；模板是 backend/config.ini.example
 backend/config.ini
+# 会话文件的存储目录（config.ini 的 [storage]）：用户和模型产生的内容，不进仓库
+backend/storage/

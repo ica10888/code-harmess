@@ -78,11 +78,13 @@ class RunTurnTests(TestCase):
         assert [m["content"] for m in sent if m["role"] == "user"] == ["first", "second"]
 
     def test_tool_call_is_executed_and_result_goes_back_to_the_model(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "x.txt"
-            path.write_text("secret-content", encoding="utf-8")
-            provider = FakeProvider(calls(ToolCall("c1", "read_file", {"path": str(path)})), text("读到了"))
-            _, reply = run(provider, "看看 x.txt")
+        with tempfile.TemporaryDirectory() as storage, override_settings(HARNESS_STORAGE_DIR=storage):
+            session = ChatSession.objects.create(owner_key="k")
+            workspace = Path(harness.workspace_dir(session))
+            workspace.mkdir(parents=True)
+            (workspace / "x.txt").write_text("secret-content", encoding="utf-8")
+            provider = FakeProvider(calls(ToolCall("c1", "read_file", {"path": "x.txt"})), text("读到了"))
+            _, reply = run(provider, "看看 x.txt", session=session)
         assert reply == "读到了"
         tool_message = provider.calls[1]["conversation"][-1]
         assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "c1"
@@ -91,10 +93,10 @@ class RunTurnTests(TestCase):
     def test_model_only_gets_read_only_tools_and_a_web_prompt(self):
         provider = FakeProvider(text("ok"))
         run(provider)
-        assert provider.calls[0]["tools"] == ["read_file", "list_files"]
+        assert provider.calls[0]["tools"] == ["read_file", "list_files"]  # 默认只读：没有 edit_file
         system = provider.calls[0]["system"]
         assert "web chat page" in system and "read_file" in system
-        assert "run_bash" not in system and "edit_file" not in system
+        assert "edit_file" not in system and "run_bash" not in system  # 提示词里也不提没给的工具
 
     def test_tool_outside_the_allowed_list_comes_back_as_an_error_result(self):
         provider = FakeProvider(calls(ToolCall("c1", "run_bash", {"command": "echo hi"})), text("好吧"))
@@ -102,11 +104,13 @@ class RunTurnTests(TestCase):
         assert reply == "好吧"  # 循环没有崩
         assert "unknown tool: run_bash" in provider.calls[1]["conversation"][-1]["content"]
 
-    def test_tool_needing_approval_is_refused_even_if_configured(self):
+    def test_tool_needing_approval_is_not_available_even_if_the_model_asks_for_it(self):
+        # run_bash 不在工作区工具里：配置里写了也不提供；模型自己硬要调，得到的是 unknown tool 错误，循环不会崩
         provider = FakeProvider(calls(ToolCall("c1", "run_bash", {"command": "echo hi"})), text("好吧"))
         with override_settings(HARNESS_TOOLS=["read_file", "run_bash"]):
-            run(provider)
-        assert "denied" in provider.calls[1]["conversation"][-1]["content"]
+            _, reply = run(provider)
+        assert reply == "好吧"
+        assert "unknown tool: run_bash" in provider.calls[1]["conversation"][-1]["content"]
 
     def test_endless_tool_calls_pause_after_the_round_limit_with_every_call_answered(self):
         looping = [calls(ToolCall(f"c{i}", "list_files", {"path": "."})) for i in range(3)]
@@ -286,3 +290,92 @@ class StreamMessageApiTests(TestCase):
 
     def test_other_browser_gets_404(self):
         assert self.post(FakeProvider(), client=APIClient()).status_code == 404
+
+
+class WorkspaceTests(TestCase):
+    """每个会话一个目录：<HARNESS_STORAGE_DIR>/input/<会话id>/file，工具只能在里面读写。"""
+
+    def setUp(self):
+        self.storage = tempfile.TemporaryDirectory()
+        self.addCleanup(self.storage.cleanup)
+        override = override_settings(HARNESS_STORAGE_DIR=self.storage.name, HARNESS_TOOLS=["read_file", "list_files", "edit_file"])
+        override.enable()
+        self.addCleanup(override.disable)
+
+    def test_workspace_path_is_storage_input_session_id_file(self):
+        session = ChatSession.objects.create(owner_key="k")
+        expected = Path(self.storage.name) / "input" / str(session.id) / "file"
+        assert Path(harness.workspace_dir(session)) == expected
+
+    def test_directory_is_created_when_the_model_first_uses_a_tool(self):
+        session = ChatSession.objects.create(owner_key="k")
+        workspace = Path(harness.workspace_dir(session))
+        assert not workspace.exists()  # 只是聊天、没用工具，就不建目录
+
+        provider = FakeProvider(calls(ToolCall("c1", "list_files", {})), text("空的"))
+        run(provider, session=session)
+
+        assert workspace.is_dir()
+
+    def test_edit_file_puts_the_file_in_this_sessions_directory(self):
+        session = ChatSession.objects.create(owner_key="k")
+        provider = FakeProvider(
+            calls(ToolCall("c1", "edit_file", {"path": "notes/a.txt", "old_str": "", "new_str": "hello"})), text("写好了")
+        )
+
+        run(provider, session=session)
+
+        written = Path(self.storage.name) / "input" / str(session.id) / "file" / "notes" / "a.txt"
+        assert written.read_text(encoding="utf-8") == "hello"
+        assert not (Path.cwd() / "notes" / "a.txt").exists()  # 没有落到项目目录
+
+    def test_files_written_in_one_turn_are_listed_and_readable_in_the_next(self):
+        session = ChatSession.objects.create(owner_key="k")
+        run(FakeProvider(calls(ToolCall("c1", "edit_file", {"path": "a.txt", "old_str": "", "new_str": "内容"})), text("ok")), session=session)
+
+        provider = FakeProvider(
+            calls(ToolCall("c2", "list_files", {}), ToolCall("c3", "read_file", {"path": "a.txt"})), text("看到了")
+        )
+        run(provider, session=ChatSession.objects.get(pk=session.pk))
+
+        results = [m["content"] for m in provider.calls[1]["conversation"] if m["role"] == "tool"][-2:]
+        assert "a.txt" in results[0] and "内容" in results[1]
+
+    def test_two_sessions_do_not_see_each_other(self):
+        a, b = ChatSession.objects.create(owner_key="k"), ChatSession.objects.create(owner_key="k")
+        run(FakeProvider(calls(ToolCall("c1", "edit_file", {"path": "mine.txt", "old_str": "", "new_str": "x"})), text("ok")), session=a)
+
+        provider = FakeProvider(calls(ToolCall("c2", "list_files", {})), text("ok"))
+        run(provider, session=b)
+
+        assert "mine.txt" not in provider.calls[1]["conversation"][-1]["content"]
+
+    def test_escaping_the_session_directory_comes_back_as_an_error_result(self):
+        (Path(self.storage.name) / "secret.txt").write_text("top secret", encoding="utf-8")
+        session = ChatSession.objects.create(owner_key="k")
+        provider = FakeProvider(calls(ToolCall("c1", "read_file", {"path": "../../../secret.txt"})), text("读不了"))
+
+        _, reply = run(provider, session=session)
+
+        assert reply == "读不了"  # 循环没崩
+        result = provider.calls[1]["conversation"][-1]["content"]
+        assert "outside the workspace" in result and "top secret" not in result
+
+    def test_prompt_tells_the_model_it_works_in_a_private_directory(self):
+        provider = FakeProvider(text("ok"))
+        run(provider)
+        system = provider.calls[0]["system"]
+        assert "relative" in system and "workspace" in system
+        assert self.storage.name not in system  # 不把服务器上的真实路径告诉模型
+
+    def test_read_only_default_has_no_edit_file(self):
+        with override_settings(HARNESS_TOOLS=["read_file", "list_files"]):
+            provider = FakeProvider(text("ok"))
+            run(provider)
+        assert provider.calls[0]["tools"] == ["read_file", "list_files"]
+
+    def test_run_bash_is_never_offered_even_if_configured(self):
+        with override_settings(HARNESS_TOOLS=["read_file", "run_bash"]):
+            provider = FakeProvider(text("ok"))
+            run(provider)
+        assert provider.calls[0]["tools"] == ["read_file"]  # 它跑任意命令，限制不住目录
