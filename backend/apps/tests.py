@@ -34,6 +34,58 @@ class SessionApiTests(TestCase):
         assert new_session(APIClient(), title="")["title"] == "新会话"
 
 
+class SessionTitleTests(TestCase):
+    def send(self, client, sid, text):
+        with mock.patch("apps.services.generate_reply", return_value="ok"):
+            client.post(f"/api/sessions/{sid}/messages/", {"content": text}, format="json")
+
+    def title_of(self, client, sid):
+        return next(s["title"] for s in client.get("/api/sessions/").json() if s["id"] == sid)
+
+    def test_first_message_becomes_title(self):
+        client = APIClient()
+        sid = new_session(client, title="")["id"]
+        self.send(client, sid, "你好")
+        assert self.title_of(client, sid) == "你好"
+
+    def test_long_first_message_is_cut_to_15_chars_with_ellipsis(self):
+        client = APIClient()
+        sid = new_session(client, title="")["id"]
+        self.send(client, sid, "一二三四五六七八九十一二三四五六七")
+        assert self.title_of(client, sid) == "一二三四五六七八九十一二三四五..."
+
+    def test_exactly_15_chars_is_kept_whole(self):
+        client = APIClient()
+        sid = new_session(client, title="")["id"]
+        self.send(client, sid, "一二三四五六七八九十一二三四五")
+        assert self.title_of(client, sid) == "一二三四五六七八九十一二三四五"
+
+    def test_later_messages_do_not_change_title(self):
+        client = APIClient()
+        sid = new_session(client, title="")["id"]
+        self.send(client, sid, "第一句")
+        self.send(client, sid, "第二句")
+        assert self.title_of(client, sid) == "第一句"
+
+    def test_stream_sends_title_event_first_time_only(self):
+        client = APIClient()
+        sid = new_session(client, title="")["id"]
+        with mock.patch("apps.services.harness.stream_turn", side_effect=lambda *a: iter([("done", "ok")])):
+            first = b"".join(
+                client.post(
+                    f"/api/sessions/{sid}/messages/stream/", {"content": "你好"}, format="json"
+                ).streaming_content
+            )
+            second = b"".join(
+                client.post(
+                    f"/api/sessions/{sid}/messages/stream/", {"content": "再见"}, format="json"
+                ).streaming_content
+            )
+        assert b"event: title" in first and "你好".encode() in first
+        assert b"event: title" not in second
+        assert self.title_of(client, sid) == "你好"
+
+
 class SendMessageTests(TestCase):
     def test_post_stores_user_message_and_the_reply_from_generate_reply(self):
         client = APIClient()

@@ -67,3 +67,17 @@ export const uploadFile = (sessionId, file, onProgress) => {
     })
     .then((r) => r.data)
 }
+
+// --- 插件（skill）管理：每个会话一份，文件存在后端 <存储路径>/input/<会话id>/skills/ ---
+export const listPlugins = (sessionId) => http.get(`/sessions/${sessionId}/plugins/`).then((r) => r.data)
+/** 上传一个 SKILL.md 新增插件，返回新建的插件（默认不勾选）。 */
+export const addPlugin = (sessionId, file) => {
+  const form = new FormData()
+  form.append('file', file)
+  return http.post(`/sessions/${sessionId}/plugins/`, form).then((r) => r.data)
+}
+/** 勾选 / 取消勾选，返回更新后的插件。name 是插件名称（后端的目录名）。 */
+export const setPluginEnabled = (sessionId, name, enabled) =>
+  http.patch(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
+export const deletePlugin = (sessionId, name) =>
+  http.delete(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`)

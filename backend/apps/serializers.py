@@ -32,3 +32,20 @@ class SendMessageSerializer(serializers.Serializer):
     # 本次请求用哪个模型、多强的推理；都可选，不给就用服务端默认。给了就必须是枚举里的值（空串也不行）
     model = serializers.ChoiceField(choices=[m.value for m in Model], required=False)
     effort = serializers.ChoiceField(choices=[e.value for e in Effort], required=False)
+
+
+class PluginSerializer(serializers.Serializer):
+    """插件（列表用）：不带文件内容。名称就是文件名。"""
+
+    name = serializers.CharField(read_only=True)
+    enabled = serializers.BooleanField()
+
+
+class PluginDetailSerializer(PluginSerializer):
+    content = serializers.CharField(read_only=True)  # 文件全文
+
+
+class PluginUpdateSerializer(serializers.Serializer):
+    """PATCH 请求体：只能改勾选状态，名称和内容不能改（要改就删了重新上传）。"""
+
+    enabled = serializers.BooleanField()

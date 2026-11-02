@@ -18,7 +18,11 @@ model = deepseek-flash
 base_url = https://api.deepseek.com
 
 [storage]
-; 存放会话文件的根目录；每个会话的文件在 <dir>/input/<会话id>/file/。相对路径按 backend/ 解析
+; 存储根目录：所有会话产生的文件都放在这里。相对路径按 backend/ 解析。目录结构：
+;   <dir>/input/<会话id>/file/               用户上传的文件，以及模型用文件工具读写的文件
+;   <dir>/input/<会话id>/skills/<文件名>.md   这个会话的插件：任何 .md 文件都可以，原样保存，文件名就是插件名
+;   <dir>/input/<会话id>/skills/state.json   哪些插件被勾选，形如 {"<文件名>.md": true}
+; 目录都是第一次用到时才创建；整个存储根目录已在 .gitignore，不会进仓库。
 dir = storage
-; 单个上传文件的大小上限，单位 MB
+; 单个上传文件的大小上限，单位 MB；普通上传和插件上传共用这一个上限
 max_upload_mb = 20

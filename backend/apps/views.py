@@ -15,7 +15,14 @@ from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
 from . import services
 from .models import ChatSession, Message
 from .options import Effort, Model
-from .serializers import ChatSessionSerializer, MessageSerializer, SendMessageSerializer
+from .serializers import (
+    ChatSessionSerializer,
+    MessageSerializer,
+    PluginDetailSerializer,
+    PluginSerializer,
+    PluginUpdateSerializer,
+    SendMessageSerializer,
+)
 
 
 def get_own_session(request, session_id) -> ChatSession:
@@ -133,3 +140,57 @@ class OptionsView(APIView):
                 "default_effort": DEFAULT_EFFORT,
             }
         )
+
+
+def plugin_error(e: services.PluginError) -> Response:
+    return Response({"detail": str(e)}, status=e.status)
+
+
+class PluginListView(APIView):
+    """GET 列出这个会话的插件；POST 上传一个 .md 文件新增插件（表单字段 file）。"""
+
+    parser_classes = [MultiPartParser]
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        return Response(PluginSerializer(services.list_plugins(session), many=True).data)
+
+    def post(self, request, session_id):
+        session = get_own_session(request, session_id)
+        uploaded = request.FILES.get("file")
+        if uploaded is None:
+            return Response({"detail": "请选择一个 .md 文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            plugin = services.create_plugin(session, uploaded)
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(PluginSerializer(plugin).data, status=status.HTTP_201_CREATED)
+
+
+class PluginDetailView(APIView):
+    """GET 看详情（带文件全文）；PATCH 改勾选状态；DELETE 删除。<name> 就是插件的文件名（如 notes.md）。"""
+
+    def get(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        try:
+            return Response(PluginDetailSerializer(services.get_plugin(session, name)).data)
+        except services.PluginError as e:
+            return plugin_error(e)
+
+    def patch(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        serializer = PluginUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            plugin = services.set_plugin_enabled(session, name, serializer.validated_data["enabled"])
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(PluginSerializer(plugin).data)
+
+    def delete(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        try:
+            services.delete_plugin(session, name)
+        except services.PluginError as e:
+            return plugin_error(e)
+        return Response(status=status.HTTP_204_NO_CONTENT)

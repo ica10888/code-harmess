@@ -268,8 +268,9 @@ class StreamMessageApiTests(TestCase):
         res = self.post(FakeProvider(text("你好世界")), "问")
         assert res["Content-Type"].startswith("text/event-stream") and res["Cache-Control"] == "no-cache"
         events = res.events
-        assert [e for e, _ in events] == ["user", "delta", "delta", "done"]
-        assert events[0][1]["content"] == "问" and events[0][1]["role"] == "user"
+        assert [e for e, _ in events] == ["title", "user", "delta", "delta", "done"]
+        assert events[0][1] == {"title": "问"}  # 第一句话同时成为会话标题
+        assert events[1][1]["content"] == "问" and events[1][1]["role"] == "user"
         assert "".join(d["text"] for e, d in events if e == "delta") == "你好世界"
         done = events[-1][1]
         assert done["role"] == "assistant" and done["content"] == "你好世界"
@@ -279,7 +280,7 @@ class StreamMessageApiTests(TestCase):
 
     def test_model_failure_ends_with_a_done_event_carrying_the_error_text(self):
         events = self.post(FakeProvider(RuntimeError("boom"))).events
-        assert events[0][0] == "user"
+        assert [e for e, _ in events[:2]] == ["title", "user"]
         kind, done = events[-1]
         assert kind == "done" and "调用模型失败" in done["content"] and "boom" in done["content"]
         assert ChatSession.objects.get(pk=self.sid).conversation == []  # 这一轮不进对话，重发即可

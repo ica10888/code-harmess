@@ -59,6 +59,11 @@ def workspace_dir(session) -> str:
     return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "file")
 
 
+def skills_dir(session) -> str:
+    """这个会话的插件目录：<存储路径>/input/<会话id>/skills，和 file/ 同级。每个插件是其中的 <名称>/SKILL.md。"""
+    return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "skills")
+
+
 def _agent(session, model: str | None = None) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 

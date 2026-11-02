@@ -5,6 +5,7 @@ import { createSession, listMessages, listSessions, openStream, streamMessage, u
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ModelPicker from '../components/ModelPicker.vue'
+import PluginPanel from '../components/PluginPanel.vue'
 import { buildSendOptions } from '../utils/options'
 import { sendWithAttachment } from '../utils/sendFlow'
 import { createTypewriter } from '../utils/typewriter'
@@ -102,6 +103,7 @@ async function send() {
 async function streamReply(content, options) {
   // 正在长出来的回复：先用一条临时消息（id 取 Infinity，排在最后），done 到来时换成存好的真消息。
   // live 必须是 messages.value 里取回的响应式代理：改 push 之前的原对象，Vue 看不到，界面不会刷新。
+  const sessionId = currentId.value // 回复期间用户可能切走，标题要改在发送时的那个会话上
   let live = null
   // delta 到达的节奏不均匀，交给打字机匀到每一帧，每帧最多更新一次界面
   const typewriter = createTypewriter((text) => {
@@ -115,9 +117,14 @@ async function streamReply(content, options) {
   }
   try {
     await streamMessage(
-      currentId.value,
+      sessionId,
       content,
       {
+        title: ({ title }) => {
+          // 会话的第一句话：后端已把它改成标题，侧边栏同步显示
+          const current = sessions.value.find((s) => s.id === sessionId)
+          if (current) current.title = title
+        },
         user: (m) => {
           addMessages([m])
           scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
@@ -202,6 +209,8 @@ onBeforeUnmount(() => closeStream && closeStream())
         </div>
       </div>
     </main>
+
+    <PluginPanel :session-id="currentId" />
   </div>
 </template>
 
