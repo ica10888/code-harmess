@@ -79,6 +79,19 @@ EUREKA_TEXT = config.get("eureka", "text", fallback="").strip()
 EUREKA_PLUGINS = config.get("eureka", "plugins", fallback="").strip()
 EUREKA_STAGE_TIMEOUT = config.getfloat("eureka", "stage_timeout_seconds", fallback=60.0)  # 单个阶段的超时（秒）
 EUREKA_WEBHOOK_BASE_URL = config.get("eureka", "webhook_base_url", fallback="http://127.0.0.1:8000").strip()
+# eureka 插件调用 LangChain 用的 DeepSeek 配置（config.ini 的 [eureka] llm_*）：是 [deepseek] 的一份拷贝，
+# 留空的项回退到 [deepseek] 同名的值。插件不 import Django，所以由 apps 把这些值读出来、注入给插件（见 workflow_runtime）。
+def _llm(key: str, fallback: str) -> str:
+    return config.get("eureka", f"llm_{key}", fallback="").strip() or fallback
+
+
+EUREKA_LLM = {
+    "api_key": _llm("api_key", DEEPSEEK_API_KEY),
+    "model": _llm("model", DEEPSEEK_MODEL),
+    "base_url": _llm("base_url", DEEPSEEK_BASE_URL),
+    "reasoning_effort": _llm("reasoning_effort", "low"),
+    "timeout": float(_llm("timeout_seconds", "50")),
+}
 EUREKA_MAX_LOG_LINES = 500  # 单个阶段最多保留的日志行数（和 eureka.webhook 的发送端上限一致）
 # 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
 HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024

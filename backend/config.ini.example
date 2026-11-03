@@ -54,3 +54,14 @@ plugins = code_review, analyze_config
 stage_timeout_seconds = 60
 ; 插件通过 webhook 把「打印文字」发回主项目用的地址（必须能访问到本后端；接收接口只允许本机来源）。
 webhook_base_url = http://127.0.0.1:8000
+;
+; --- eureka 插件里调用 LangChain 用的 DeepSeek 配置（code_review 的「生成修改」阶段）---
+; 这是 [deepseek] 那一组配置的一份拷贝，独立于聊天用的配置：改这里只影响 eureka 插件，不影响聊天。
+; 留空的项会回退到 [deepseek] 里同名的值，所以也可以只填需要不同的那几项（比如换个模型）。
+llm_api_key = sk-your-key-here
+llm_model = deepseek-flash
+llm_base_url = https://api.deepseek.com
+; 推理强度：none / low / high / max（none 关闭思考；改写代码一般用 low 就够）
+llm_reasoning_effort = low
+; 单次调用的超时（秒）。要比 stage_timeout_seconds 小，否则阶段先超时、模型调用还在跑
+llm_timeout_seconds = 50

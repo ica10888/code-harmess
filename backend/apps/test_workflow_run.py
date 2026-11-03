@@ -19,10 +19,13 @@ from apps.test_eureka import PLUGIN, RecordingProvider
 from apps.test_harness import text
 from apps.workflows_run import run_token
 
+ORIGINAL_MODELS = "import hashlib\nclass User:\n    password = None\n"
+FIXED_MODELS = "class User:\n    password = None  # write_only\n"
+
 SUGGESTIONS = json.dumps(
     [
-        {"startLineNum": 3, "endLineNum": 4, "sugDesc": "问题 A", "sugCode": "x = 1", "codeLanguage": "python", "type": "QUESTION"},
-        {"startLineNum": 9, "endLineNum": 9, "sugDesc": "建议 B", "sugCode": "", "codeLanguage": "python", "type": "SUGGESTION"},
+        {"file": "models.py", "startLineNum": 3, "endLineNum": 4, "sugDesc": "问题 A", "sugCode": "x = 1", "codeLanguage": "python", "type": "QUESTION"},
+        {"file": "models.py", "startLineNum": 9, "endLineNum": 9, "sugDesc": "建议 B", "sugCode": "", "codeLanguage": "python", "type": "SUGGESTION"},
     ],
     ensure_ascii=False,
 )
@@ -54,12 +57,36 @@ class BaseMixin:
         override.enable()
         self.addCleanup(override.disable)
         workflow_runtime.reset()  # 每个测试用全新的注册表和 runner（不开后台线程）
+        self.model_calls = []
+        self.model_reply = FIXED_MODELS
+        self._patch_langchain()
         self.addCleanup(workflow_runtime.reset)
         self.client = APIClient()
         self.sid = self.client.post("/api/sessions/", {}, format="json").json()["id"]
         from urllib.parse import quote
 
         self.client.patch(f"/api/sessions/{self.sid}/plugins/{quote('代码审查.md')}/", {"enabled": True}, format="json")
+        self.put_original()  # 默认：用户上传过被审查的 models.py（要在会话创建之后：工作区是按会话 id 分的）
+
+    def _patch_langchain(self):
+        """集成测试里绝不调真实模型：把 LangChain 的链换成替身，记下它收到了什么。"""
+
+        def fake_chain(**_config):
+            def call(inputs):
+                self.model_calls.append(inputs)
+                return self.model_reply
+
+            return call
+
+        patcher = mock.patch("eureka.plugins.code_review.plugin.langchain_chain", side_effect=fake_chain)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def put_original(self, name="models.py", content=ORIGINAL_MODELS):
+        """把被审查的原文件放进这个会话的工作区（就像用户上传过它）。"""
+        workspace = Path(harness.workspace_dir(ChatSession.objects.get(pk=self.sid)))
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / name).write_bytes(content.encode("utf-8"))
 
     def send(self, reply=SUGGESTIONS, content="请审查"):
         # TestCase 把每个测试包在一个不提交的事务里，on_commit 的回调永远不会触发；
@@ -96,7 +123,7 @@ class TriggerTests(Base):
 
         run = WorkflowRun.objects.get()
         assert (run.plugin, run.status) == ("code-review", "pending")
-        assert [(s.index, s.key, s.status) for s in run.stages.all()] == [(0, "extract", "pending"), (1, "summarize", "pending"), (2, "report", "pending")]
+        assert [(s.index, s.key, s.status) for s in run.stages.all()] == [(0, "extract", "pending"), (1, "summarize", "pending"), (2, "report", "pending"), (3, "rewrite", "pending"), (4, "apply", "pending")]
         assert workflow_runtime.get_runner().pending_count() == 1
 
     def test_the_run_keeps_the_json_that_triggered_it(self):
@@ -161,7 +188,7 @@ class ExecutionTests(ThreadedBase):
 
         run = WorkflowRun.objects.get()
         assert run.status == "done" and run.finished_at is not None
-        assert [s.status for s in run.stages.all()] == ["done", "done", "done"]
+        assert [s.status for s in run.stages.all()] == ["done"] * 5
         assert all(s.started_at and s.finished_at for s in run.stages.all())
 
     def test_stage_outputs_are_stored_and_chained(self):
@@ -200,7 +227,7 @@ class ExecutionTests(ThreadedBase):
 
         run = WorkflowRun.objects.get()
         assert run.status == "failed" and "汇总炸了" in run.error
-        assert [s.status for s in run.stages.all()] == ["done", "failed", "pending"]
+        assert [s.status for s in run.stages.all()] == ["done", "failed", "pending", "pending", "pending"]
 
     def test_the_workspace_file_is_overwritten_not_duplicated_on_a_second_run_of_the_same_run(self):
         self.send()
@@ -223,8 +250,13 @@ class ExecutionTests(ThreadedBase):
         from urllib.parse import quote
 
         self.client.patch(f"/api/sessions/{other_sid}/plugins/{quote('代码审查.md')}/", {"enabled": True}, format="json")
-        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(SUGGESTIONS))):
-            self.client.post(f"/api/sessions/{other_sid}/messages/", {"content": "x"}, format="json")
+        other_workspace = Path(harness.workspace_dir(ChatSession.objects.get(pk=other_sid)))
+        other_workspace.mkdir(parents=True, exist_ok=True)  # 原文件是按会话放的：第二个会话也得有它自己的
+        (other_workspace / "models.py").write_bytes(ORIGINAL_MODELS.encode("utf-8"))
+        capture = getattr(self, "captureOnCommitCallbacks", None)
+        with capture(execute=True) if capture else contextlib.nullcontext():
+            with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(SUGGESTIONS))):
+                self.client.post(f"/api/sessions/{other_sid}/messages/", {"content": "x"}, format="json")
 
         self.drain()
 
@@ -352,9 +384,10 @@ class ProgressApiTests(ThreadedBase):
         data = self.client.get(self.url()).json()
 
         assert data["status"] == "done" and data["plugin"] == "code-review"
-        assert [(s["key"], s["status"], s["title"]) for s in data["stages"]] == [
-            ("extract", "done", "提取审查建议"), ("summarize", "done", "汇总"), ("report", "done", "写出报告文件"),
+        assert [(s["key"], s["status"]) for s in data["stages"]] == [
+            ("extract", "done"), ("summarize", "done"), ("report", "done"), ("rewrite", "done"), ("apply", "done"),
         ]  # fmt: skip
+        assert [s["title"] for s in data["stages"]][:3] == ["提取审查建议", "汇总", "写出报告文件"]
         assert data["stages"][0]["logs"] == ["提取到 2 条审查建议"]
 
     def test_progress_while_pending_shows_everything_as_pending(self):
@@ -502,7 +535,7 @@ class AnalyzeConfigWorkflowTests(ThreadedBase):
         run = WorkflowRun.objects.get()
         assert run.status == "done" and [s.status for s in run.stages.all()] == ["done"] * 3
         workspace = Path(harness.workspace_dir(ChatSession.objects.get(pk=self.sid)))
-        assert sorted(p.name for p in workspace.iterdir()) == [f"analyze-config-{run.id}.json", f"analyze-config-{run.id}.md"]
+        assert sorted(p.name for p in workspace.iterdir() if p.name != "models.py") == [f"analyze-config-{run.id}.json", f"analyze-config-{run.id}.md"]  # models.py 是 setUp 放的原文件
         for path in workspace.iterdir():
             assert "pw-secret-1" not in path.read_text(encoding="utf-8") and "r-secret-2" not in path.read_text(encoding="utf-8")
 
@@ -520,3 +553,169 @@ class AnalyzeConfigWorkflowTests(ThreadedBase):
     def test_a_code_review_json_does_not_trigger_this_workflow(self):
         self.send(SUGGESTIONS, "审查")  # 勾选的是「分析配置文件」，回复却是审查结果：schema 对不上，不触发
         assert WorkflowRun.objects.count() == 0
+
+
+class LangChainInjectionTests(TestCase):
+    """主项目把 config.ini 里 [eureka] llm_* 的配置注入给 code_review 插件（插件自己不读配置、不 import Django）。"""
+
+    def setUp(self):
+        self.override = override_settings(
+            EUREKA_PLUGINS="code_review",
+            EUREKA_LLM={"api_key": "sk-test-key", "model": "deepseek-flash", "base_url": "https://example.test", "reasoning_effort": "high", "timeout": 12.0},
+        )
+        self.override.enable()
+        self.addCleanup(self.override.disable)
+        workflow_runtime.reset()
+        self.addCleanup(workflow_runtime.reset)
+
+    def test_the_loaded_plugin_gets_a_chain_factory_built_from_the_eureka_llm_settings(self):
+        plugin = workflow_runtime.get_registry().get("code-review")
+
+        with mock.patch("eureka.plugins.code_review.plugin.langchain_chain", return_value=lambda inputs: "x") as build:
+            plugin.chain_factory()
+
+        build.assert_called_once_with(
+            api_key="sk-test-key", model="deepseek-flash", base_url="https://example.test", reasoning_effort="high", timeout=12.0
+        )
+
+    def test_the_chain_is_built_lazily_loading_the_registry_never_touches_langchain_or_the_network(self):
+        with mock.patch("eureka.plugins.code_review.plugin.langchain_chain") as build:
+            workflow_runtime.reset()
+            workflow_runtime.get_registry()
+        build.assert_not_called()
+
+    def test_without_an_api_key_only_the_rewrite_stage_fails_and_says_why(self):
+        with override_settings(EUREKA_LLM={"api_key": "", "model": "m", "base_url": "u", "reasoning_effort": "low", "timeout": 5.0}):
+            workflow_runtime.reset()
+            plugin = workflow_runtime.get_registry().get("code-review")
+            with self.assertRaisesMessage(ValueError, "llm_api_key"):
+                plugin.chain_factory()
+
+    def test_a_placeholder_key_counts_as_not_configured(self):
+        with override_settings(EUREKA_LLM={"api_key": "sk-your-key-here", "model": "m", "base_url": "u", "reasoning_effort": "low", "timeout": 5.0}):
+            workflow_runtime.reset()
+            plugin = workflow_runtime.get_registry().get("code-review")
+            with self.assertRaisesMessage(ValueError, "llm_api_key"):
+                plugin.chain_factory()
+
+    def test_other_plugins_are_not_touched_by_the_injection(self):
+        with override_settings(EUREKA_PLUGINS="code_review, analyze_config"):
+            workflow_runtime.reset()
+            reg = workflow_runtime.get_registry()
+        assert reg.names() == ["code-review", "analyze-config"] and reg.warnings == []
+
+    def test_the_settings_fall_back_to_the_deepseek_section_when_the_llm_ones_are_empty(self):
+        import configparser
+
+        from code_backend import settings as project_settings
+
+        # 用 config.ini.example 的结构验证回退规则（不读真实的 key）
+        parser = configparser.ConfigParser()
+        parser.read_string("[deepseek]\napi_key = sk-from-deepseek\nmodel = m1\nbase_url = http://b\n[eureka]\nllm_api_key =\n")
+        assert (parser.get("eureka", "llm_api_key").strip() or parser.get("deepseek", "api_key")) == "sk-from-deepseek"
+        assert set(project_settings.EUREKA_LLM) == {"api_key", "model", "base_url", "reasoning_effort", "timeout"}
+
+    def test_the_api_key_is_registered_as_a_secret_so_error_messages_never_echo_it(self):
+        assert "sk-test-key" in workflow_runtime._secrets()
+
+
+class RewriteWorkflowTests(ThreadedBase):
+    """code-review 的第 4、5 阶段在真实 Django 里：模型用替身，文件真的落进会话工作区。"""
+
+    def workspace(self):
+        return Path(harness.workspace_dir(ChatSession.objects.get(pk=self.sid)))
+
+    def test_the_model_receives_the_original_file_and_the_suggestions_of_this_run(self):
+        self.send()
+        self.drain()
+
+        [call] = self.model_calls
+        assert call["filename"] == "models.py" and call["original"] == ORIGINAL_MODELS
+        assert "问题 A" in call["suggestions"] and "建议 B" in call["suggestions"]
+
+    def test_the_fixed_file_is_written_next_to_the_original_and_the_original_is_untouched(self):
+        self.send()
+        self.drain()
+
+        run = WorkflowRun.objects.get()
+        fixed = self.workspace() / f"models.fixed-{run.id}.py"
+        assert fixed.read_bytes() == FIXED_MODELS.encode("utf-8")
+        assert (self.workspace() / "models.py").read_bytes() == ORIGINAL_MODELS.encode("utf-8")
+
+    def test_all_five_stages_finish_and_the_last_ones_report_what_they_did(self):
+        self.send()
+        self.drain()
+
+        run = WorkflowRun.objects.get()
+        stages = {s.key: s for s in run.stages.all()}
+        assert run.status == "done" and [s.status for s in run.stages.all()] == ["done"] * 5
+        assert stages["rewrite"].output["changed"] is True and stages["apply"].output["written"] is True
+        assert any("models.py" in log.text for log in stages["rewrite"].logs.all())
+        assert any(f"models.fixed-{run.id}.py" in log.text for log in stages["apply"].logs.all())
+
+    def test_the_progress_response_never_contains_the_file_content_or_the_api_key(self):
+        self.send()
+        self.drain()
+        run = WorkflowRun.objects.get()
+
+        shown = json.dumps(self.client.get(f"/api/sessions/{self.sid}/eureka-runs/{run.id}/").json(), ensure_ascii=False)
+
+        assert "write_only" not in shown and "hashlib" not in shown  # 进度接口不返回阶段输出，所以不会把整份文件内容送给浏览器
+        assert "sk-" not in shown
+
+    def test_a_model_failure_fails_only_the_rewrite_stage_and_nothing_is_written(self):
+        self.send()
+        with mock.patch("eureka.plugins.code_review.plugin.langchain_chain", side_effect=RuntimeError("deepseek down")):
+            self.drain()
+
+        run = WorkflowRun.objects.get()
+        assert run.status == "failed" and "deepseek down" in run.error
+        assert [s.status for s in run.stages.all()] == ["done", "done", "done", "failed", "pending"]
+        assert not list(self.workspace().glob("*.fixed-*"))  # 模型没成功，就没有新文件
+        assert (self.workspace() / "models.py").read_bytes() == ORIGINAL_MODELS.encode("utf-8")
+
+    def test_the_api_key_is_never_shown_even_if_the_model_error_contains_it(self):
+        key = "sk-leaky-key-9999"
+        with override_settings(EUREKA_LLM={"api_key": key, "model": "m", "base_url": "u", "reasoning_effort": "low", "timeout": 5.0}):
+            workflow_runtime.reset()  # 先换配置再触发：reset 会清掉队列
+            self.send()
+            with mock.patch("eureka.plugins.code_review.plugin.langchain_chain", side_effect=RuntimeError(f"401 for key {key}")):
+                self.drain()
+            run = WorkflowRun.objects.get()
+            data = self.client.get(f"/api/sessions/{self.sid}/eureka-runs/{run.id}/").json()
+        assert key not in json.dumps(data, ensure_ascii=False) and key not in run.error and "***" in run.error
+
+    def test_a_missing_original_file_fails_the_rewrite_stage_with_a_clear_message(self):
+        self.send()
+        (self.workspace() / "models.py").unlink()
+
+        self.drain()
+
+        run = WorkflowRun.objects.get()
+        assert run.status == "failed" and "models.py" in run.error and "上传" in run.error
+
+    def test_the_model_saying_nothing_needs_changing_writes_no_new_file(self):
+        self.model_reply = ORIGINAL_MODELS
+        self.send()
+        self.drain()
+
+        run = WorkflowRun.objects.get()
+        assert run.status == "done" and not list(self.workspace().glob("*.fixed-*"))
+        assert {s.key: s for s in run.stages.all()}["apply"].output["written"] is False
+
+    def test_rerunning_after_a_failure_resumes_at_rewrite_without_redoing_the_first_three_stages(self):
+        self.send()
+        with mock.patch("eureka.plugins.code_review.plugin.langchain_chain", side_effect=RuntimeError("temporary")):
+            self.drain()
+        run = WorkflowRun.objects.get()
+        report = self.workspace() / f"code-review-report-{run.id}.md"
+        report_mtime = report.stat().st_mtime_ns
+
+        WorkflowRun.objects.filter(pk=run.pk).update(status="running", error="")  # 模拟重启恢复
+        StageRun.objects.filter(run=run, key="rewrite").update(status="running", error="")
+        workflow_runtime.recover()
+        self.drain()
+
+        run.refresh_from_db()
+        assert run.status == "done" and report.stat().st_mtime_ns == report_mtime  # 报告没被重写
+        assert (self.workspace() / f"models.fixed-{run.id}.py").is_file()

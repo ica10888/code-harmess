@@ -99,13 +99,38 @@ class DjangoStore:
         return list(WorkflowRun.objects.filter(status__in=["pending", "running"]).order_by("id").values_list("id", flat=True))
 
 
+def _load_registry() -> eureka_registry.Registry:
+    """按 config.ini 加载插件，并把需要的配置注入给它们。插件不读配置、不 import Django，所以由这里注入。"""
+    loaded = eureka_registry.load(eureka_registry.parse_plugin_list(settings.EUREKA_PLUGINS))
+    for warning in loaded.warnings:
+        logger.warning("eureka 插件：%s", warning)
+    code_review = loaded.get("code-review")
+    if code_review is not None:
+        code_review.chain_factory = _langchain_factory  # 它的「生成修改」阶段要调模型
+    return loaded
+
+
+def _langchain_factory():
+    """造 code_review 用的 LangChain 链。每次用到才造（读当时的配置），所以加载插件时不碰 LangChain、不联网。"""
+    from eureka.plugins.code_review.plugin import langchain_chain
+
+    llm = settings.EUREKA_LLM
+    if not llm["api_key"] or llm["api_key"].startswith("sk-your"):
+        raise ValueError("没有配置 DeepSeek 的 key：请在 backend/config.ini 的 [eureka] 里填 llm_api_key（或 [deepseek] api_key）")
+    return langchain_chain(
+        api_key=llm["api_key"],
+        model=llm["model"],
+        base_url=llm["base_url"],
+        reasoning_effort=llm["reasoning_effort"],
+        timeout=llm["timeout"],
+    )
+
+
 def get_registry() -> eureka_registry.Registry:
     global _registry
     with _lock:
         if _registry is None:
-            _registry = eureka_registry.load(eureka_registry.parse_plugin_list(settings.EUREKA_PLUGINS))
-            for warning in _registry.warnings:
-                logger.warning("eureka 插件：%s", warning)
+            _registry = _load_registry()
         return _registry
 
 
@@ -127,15 +152,13 @@ def get_registry_unlocked() -> eureka_registry.Registry:
     # get_runner 已经持有锁时用：不能再 with _lock（threading.Lock 不可重入）
     global _registry
     if _registry is None:
-        _registry = eureka_registry.load(eureka_registry.parse_plugin_list(settings.EUREKA_PLUGINS))
-        for warning in _registry.warnings:
-            logger.warning("eureka 插件：%s", warning)
+        _registry = _load_registry()
     return _registry
 
 
 def _secrets() -> list[str]:
-    """错误信息里绝不能出现的密钥：DeepSeek 的 key 和 Django 的 SECRET_KEY。"""
-    return [settings.DEEPSEEK_API_KEY, settings.SECRET_KEY]
+    """错误信息里绝不能出现的密钥：DeepSeek 的 key（聊天用的和 eureka 插件用的）和 Django 的 SECRET_KEY。"""
+    return [settings.DEEPSEEK_API_KEY, settings.EUREKA_LLM["api_key"], settings.SECRET_KEY]
 
 
 def reset() -> None:

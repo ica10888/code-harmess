@@ -14,9 +14,9 @@ from eureka.base import StageContext, StageResult, validate_stages
 from eureka.plugins.code_review.plugin import PLUGIN, CodeReview
 
 SUGGESTIONS = [
-    {"startLineNum": 22, "endLineNum": 22, "sugDesc": "密码未设为只写", "sugCode": "extra_kwargs = {}", "codeLanguage": "python", "type": "QUESTION"},
-    {"startLineNum": 54, "endLineNum": 55, "sugDesc": "N+1 查询", "sugCode": "select_related()", "codeLanguage": "python", "type": "SUGGESTION"},
-    {"startLineNum": 1, "endLineNum": 1, "sugDesc": "无用导入", "sugCode": "", "codeLanguage": "python", "type": "SUGGESTION"},
+    {"file": "models.py", "startLineNum": 22, "endLineNum": 22, "sugDesc": "密码未设为只写", "sugCode": "extra_kwargs = {}", "codeLanguage": "python", "type": "QUESTION"},
+    {"file": "models.py", "startLineNum": 54, "endLineNum": 55, "sugDesc": "N+1 查询", "sugCode": "select_related()", "codeLanguage": "python", "type": "SUGGESTION"},
+    {"file": "models.py", "startLineNum": 1, "endLineNum": 1, "sugDesc": "无用导入", "sugCode": "", "codeLanguage": "python", "type": "SUGGESTION"},
 ]
 
 
@@ -37,10 +37,10 @@ def test_the_plugin_is_named_like_the_workflow_it_belongs_to():
     assert PLUGIN is CodeReview
 
 
-def test_it_declares_three_stages_in_order_and_passes_the_main_projects_validation():
+def test_it_declares_its_stages_in_order_and_passes_the_main_projects_validation():
     stages = validate_stages(CodeReview())
-    assert [s.key for s in stages] == ["extract", "summarize", "report"]
-    assert [s.method for s in stages] == ["reconcile_extract", "reconcile_summarize", "reconcile_report"]
+    assert [s.key for s in stages] == ["extract", "summarize", "report", "rewrite", "apply"]  # 前三个阶段在这个文件里测，后两个在 test_code_review_rewrite.py
+    assert [s.method for s in stages[:3]] == ["reconcile_extract", "reconcile_summarize", "reconcile_report"]
     assert all(s.title for s in stages)
 
 
@@ -60,7 +60,7 @@ def test_extract_normalizes_the_suggestions_and_reports_how_many(tmp_path):
     assert isinstance(result, StageResult)
     items = result.output["suggestions"]
     assert [i["start"] for i in items] == [22, 54, 1] and items[1]["end"] == 55
-    assert items[0] == {"start": 22, "end": 22, "type": "QUESTION", "desc": "密码未设为只写", "code": "extra_kwargs = {}", "language": "python"}
+    assert items[0] == {"file": "models.py", "start": 22, "end": 22, "type": "QUESTION", "desc": "密码未设为只写", "code": "extra_kwargs = {}", "language": "python"}
     assert any("3" in line for line in lines)  # 打印了提取到几条
 
 
@@ -204,10 +204,10 @@ def test_the_report_escapes_nothing_dangerous_it_is_just_text_in_a_file(tmp_path
 # --- 整条链路 ---
 
 
-def test_all_three_stages_chain_together_through_previous(tmp_path):
+def test_the_first_three_stages_chain_together_through_previous(tmp_path):
     plugin = CodeReview()
     previous: dict = {}
-    for stage in validate_stages(plugin):
+    for stage in validate_stages(plugin)[:3]:  # 后两个阶段要调模型，链路在 test_code_review_rewrite.py 里用替身测
         ctx, _ = ctx_for(tmp_path, previous=dict(previous))
         previous[stage.key] = getattr(plugin, stage.method)(ctx).output
     assert set(previous) == {"extract", "summarize", "report"}

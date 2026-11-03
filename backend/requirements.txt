@@ -5,3 +5,4 @@ openai>=1.0
 rich>=15.0.0
 prompt-toolkit>=3.0.53
 jsonschema>=4.18
+langchain-openai>=1.0
