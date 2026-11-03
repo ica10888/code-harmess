@@ -81,18 +81,6 @@ iTerm2 开了「Report modifiers using CSI u」）会发转义序列，`cli_inpu
 
 ## 角色（persona）
 
-同一个模型，换一套 harness 配置，就是另一个 agent。角色放在 `.agents/personas/<名字>.md`：
-
-```markdown
----
-name: bajie                      # 名字：/persona bajie 用它（小写字母、数字、连字符）
-title: 猪八戒                    # 展示名，可选
-description: 检查员：对照 PLAN.md 挑毛病，只看不改
-emoji: 🐷                        # 可选
-tools: read_file, list_files     # 逗号分隔一行；不写就是纯聊天
----
-你是猪八戒……（中文正文：替换 system prompt 的第一句，其余段落仍按工具自动拼出来）
-```
 
 ```bash
 uv run --env-file .env src/agent.py                   # 从内置的 default 开始，进去后 /persona wukong 切换
