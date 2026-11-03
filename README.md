@@ -1,6 +1,9 @@
 # code-harness
 
 
+![demo](https://github.com/ica10888/code-harmess/blob/main/docs/image.png)
+
+
 **还没覆盖的**
 
 - **对话摘要**（类似 `/compact`）：目前只修剪工具结果；长对话本身的文字还会一直增长
