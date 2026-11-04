@@ -11,7 +11,7 @@ from django.conf import settings
 from skills import load_skill_file  # core：能不能当 skill，以它的判断为准
 
 from . import harness
-from .models import ChatSession, Eureka, Message
+from .models import ChatSession, Eureka, FileChange, Message
 from .serializers import MessageSerializer
 
 
@@ -107,7 +107,68 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
                 logging.getLogger(__name__).exception("展开 eureka 工作流失败，已忽略")
     except Exception:
         logging.getLogger(__name__).exception("eureka 判定失败，已忽略")
+    try:
+        detect_file_change(session, message)
+    except Exception:
+        logging.getLogger(__name__).exception("文件变更检测失败，已忽略")
     return Message.objects.get(pk=message.pk)  # 重新取一次：让 message.eureka 能读到刚存的那条
+
+
+DEFAULT_FILE_CHANGE_TEXT = "📝 有文件变更"
+
+
+def _workspace_snapshot(session: ChatSession) -> dict:
+    """工作区里所有文件的快照 {相对路径: [mtime_ns, size]}；工作区还不存在就是空。"""
+    root = Path(harness.workspace_dir(session))
+    snapshot = {}
+    for path in root.rglob("*"):
+        if path.is_file():
+            stat = path.stat()
+            snapshot[path.relative_to(root).as_posix()] = [stat.st_mtime_ns, stat.st_size]
+    return snapshot
+
+
+def detect_file_change(session: ChatSession, message: Message) -> FileChange | None:
+    """和上一次的快照比较：工作区有文件创建或变更，就存一条 FileChange 挂在 message 上；然后更新快照。
+
+    判定出任何问题都只是「没有提示」，调用方会兜住异常，不影响回复本身。
+    """
+    old, new = session.file_snapshot or {}, _workspace_snapshot(session)
+    files = [
+        {"path": path, "kind": "created" if path not in old else "modified"}
+        for path in sorted(new)
+        if old.get(path) != new[path]
+    ]
+    session.file_snapshot = new
+    session.save(update_fields=["file_snapshot"])
+    if not files:
+        return None
+    text = settings.FILE_CHANGE_TEXT.strip() or DEFAULT_FILE_CHANGE_TEXT
+    return FileChange.objects.create(message=message, text=text, files=files)
+
+
+MAX_VIEW_BYTES = 200 * 1024  # 查看文件内容最多读这么多，防止大文件撑爆页面
+
+
+def list_workspace_files(session: ChatSession) -> list[dict]:
+    """本会话工作区里所有文件 [{"path", "size"}]，按路径排序；路径固定是 harness.workspace_dir(session)。"""
+    snapshot = _workspace_snapshot(session)
+    return [{"path": path, "size": meta[1]} for path, meta in sorted(snapshot.items())]
+
+
+def read_workspace_file(session: ChatSession, rel_path: str) -> dict | None:
+    """读工作区里一个文件的文本内容 {"path", "content", "truncated"}；不存在或跑出工作区就是 None。"""
+    root = Path(harness.workspace_dir(session)).resolve()
+    path = (root / rel_path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():  # 挡住 ../ 和绝对路径
+        return None
+    with open(path, "rb") as f:
+        data = f.read(MAX_VIEW_BYTES + 1)
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "content": data[:MAX_VIEW_BYTES].decode("utf-8", errors="replace"),
+        "truncated": len(data) > MAX_VIEW_BYTES,
+    }
 
 
 def send_user_message(

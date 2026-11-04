@@ -13,6 +13,8 @@ class ChatSession(models.Model):
     title = models.CharField(max_length=100, default="新会话")
     # 发给模型的完整对话（含工具调用和结果），格式是 core 的 provider 用的；和给用户看的 Message 是两份
     conversation = models.JSONField(default=list, blank=True)
+    # 工作区上一次检测时的快照 {相对路径: [mtime_ns, size]}；和这次的快照比较，就知道有文件创建或变更
+    file_snapshot = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -32,6 +34,18 @@ class Message(models.Model):
 
     class Meta:
         ordering = ["id"]
+
+
+class FileChange(models.Model):
+    """文件变更提示：这一轮结束时工作区里有文件创建或变更，就挂在那条 assistant 消息上的一条提示（和 Eureka 同一套逻辑）。
+
+    单独一张表，不进模型上下文。text 存当时展示的文本；files 是 [{"path": ..., "kind": "created"/"modified"}, ...]。
+    """
+
+    message = models.OneToOneField(Message, on_delete=models.CASCADE, related_name="file_change")  # 一条消息最多一个
+    text = models.TextField()
+    files = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class Eureka(models.Model):

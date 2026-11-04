@@ -8,6 +8,8 @@ urlpatterns = [
     path("sessions/<uuid:session_id>/messages/", views.MessageListView.as_view()),
     path("sessions/<uuid:session_id>/messages/stream/", views.StreamMessageView.as_view()),
     path("sessions/<uuid:session_id>/files/", views.FileUploadView.as_view()),
+    path("sessions/<uuid:session_id>/workspace/", views.WorkspaceFileListView.as_view()),
+    path("sessions/<uuid:session_id>/workspace/file/", views.WorkspaceFileContentView.as_view()),
     path("sessions/<uuid:session_id>/plugins/", views.PluginListView.as_view()),
     path("sessions/<uuid:session_id>/plugins/<str:name>/", views.PluginDetailView.as_view()),
     path("sessions/<uuid:session_id>/workflows/", views.WorkflowListView.as_view()),

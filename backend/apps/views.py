@@ -148,6 +148,25 @@ def plugin_error(e: services.PluginError) -> Response:
     return Response({"detail": str(e)}, status=e.status)
 
 
+class WorkspaceFileListView(APIView):
+    """本会话工作区的文件列表。"""
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        return Response(services.list_workspace_files(session))
+
+
+class WorkspaceFileContentView(APIView):
+    """查看本会话工作区里一个文件的内容：?path=<相对路径>。"""
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        result = services.read_workspace_file(session, request.query_params.get("path", ""))
+        if result is None:
+            raise Http404
+        return Response(result)
+
+
 class PluginListView(APIView):
     """GET 列出这个会话的插件；POST 上传一个 .md 文件新增插件（表单字段 file）。"""
 

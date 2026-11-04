@@ -76,6 +76,8 @@ HARNESS_DEFAULT_WORKFLOW_DIR = str((BASE_DIR / _default_workflow).resolve()) if 
 # eureka 时刻的提示文本（读自 config.ini 的 [eureka] text）；留空时用 apps.workflows.DEFAULT_EUREKA_TEXT
 EUREKA_TEXT = config.get("eureka", "text", fallback="").strip()
 # eureka 之后展开工作流的插件（backend/eureka/plugins/<目录名>/，逗号分隔）；留空表示不展开任何工作流
+# 文件变更提示的文本（config.ini 的 [eureka] file_change_text）；留空时用 apps.services.DEFAULT_FILE_CHANGE_TEXT
+FILE_CHANGE_TEXT = config.get("eureka", "file_change_text", fallback="").strip()
 EUREKA_PLUGINS = config.get("eureka", "plugins", fallback="").strip()
 EUREKA_STAGE_TIMEOUT = config.getfloat("eureka", "stage_timeout_seconds", fallback=60.0)  # 单个阶段的超时（秒）
 EUREKA_WEBHOOK_BASE_URL = config.get("eureka", "webhook_base_url", fallback="http://127.0.0.1:8000").strip()

@@ -10,6 +10,12 @@ export const listMessages = (sessionId, after = 0) =>
 export const sendMessage = (sessionId, content, options = {}) =>
   http.post(`/sessions/${sessionId}/messages/`, { content, ...options }).then((r) => r.data)
 
+/** 本会话工作区的文件列表 [{ path, size }]。 */
+export const listWorkspaceFiles = (sessionId) => http.get(`/sessions/${sessionId}/workspace/`).then((r) => r.data)
+/** 查看工作区里一个文件：{ path, content, truncated }。 */
+export const readWorkspaceFile = (sessionId, path) =>
+  http.get(`/sessions/${sessionId}/workspace/file/`, { params: { path } }).then((r) => r.data)
+
 /** 可选的模型和推理强度（后端写死的枚举）：{ models, efforts, default_model, default_effort }。 */
 export const getOptions = () => http.get('/options/').then((r) => r.data)
 

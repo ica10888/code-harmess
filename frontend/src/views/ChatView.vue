@@ -3,6 +3,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
+import FileChangeBanner from '../components/FileChangeBanner.vue'
 import EurekaRunPanel from '../components/EurekaRunPanel.vue'
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
@@ -191,6 +192,8 @@ onBeforeUnmount(() => closeStream && closeStream())
           <div class="bubble">{{ m.content }}</div>
           <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
           <EurekaBanner v-if="m.eureka" :text="m.eureka.text" />
+          <!-- 文件变更：这一轮工作区有文件创建或变更；和 eureka 提示条一样，刷新后由后端带回来 -->
+          <FileChangeBanner v-if="m.file_change && currentId" :session-id="currentId" :text="m.file_change.text" :files="m.file_change.files" />
           <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
           <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
           <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->

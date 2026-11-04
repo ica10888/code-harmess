@@ -23,14 +23,20 @@ class MessageSerializer(serializers.ModelSerializer):
     # 这条消息有 eureka 时刻就带上 {"text": ...}，没有就是 null。它只是展示用的，不是消息内容，不会进模型上下文
     eureka = serializers.SerializerMethodField()
     notice = serializers.SerializerMethodField()  # 给用户看的提示，没有就是 null
+    # 这一轮工作区有文件创建或变更就带上 {"text", "files"}，没有就是 null；同样只是展示用的
+    file_change = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
-        fields = ["id", "role", "content", "created_at", "eureka", "notice"]
+        fields = ["id", "role", "content", "created_at", "eureka", "notice", "file_change"]
         read_only_fields = fields
 
     def get_notice(self, message):
         return message.notice or None
+
+    def get_file_change(self, message):
+        change = getattr(message, "file_change", None)
+        return {"text": change.text, "files": change.files} if change else None
 
     def get_eureka(self, message):
         eureka = getattr(message, "eureka", None)  # 反向一对一：没有就是 None（这里不会触发额外查询报错）
