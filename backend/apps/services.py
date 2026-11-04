@@ -91,8 +91,12 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
         hit = workflows.match_eureka(session, used_plugin_names(session), reply)
         if not hit:
             checked = workflows.checked_workflow(session)
-            if checked:  # 用户勾了工作流，这一轮却没按它的格式回复：告诉用户为什么没有 eureka
-                message.notice = f"这次回复没有按工作流 {checked['name']} 的格式输出，所以没有触发 eureka。可以补充要处理的内容后重试。"
+            # 勾了工作流却用不了（文件被删、schema 坏了）：先说这个；能用但回复不符合格式：说明为什么没有 eureka
+            notice = workflows.checked_problem(session)
+            if not notice and checked:
+                notice = f"这次回复没有按工作流 {checked['name']} 的格式输出，所以没有触发 eureka。可以补充要处理的内容后重试。"
+            if notice:
+                message.notice = notice
                 message.save(update_fields=["notice"])
         if hit:
             eureka = Eureka.objects.create(

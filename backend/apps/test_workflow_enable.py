@@ -20,7 +20,7 @@ from apps.test_eureka import GOOD, PLUGIN, REVIEW_SCHEMA, RecordingProvider, flo
 from apps.test_harness import text
 
 
-class WorkflowEnableTests(TestCase):
+class WorkflowBase(TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -60,6 +60,8 @@ class WorkflowEnableTests(TestCase):
     def user_text(self, provider, call=0):
         return "\n".join(m["content"] for m in provider.calls[call]["conversation"] if m.get("role") == "user")
 
+
+class WorkflowEnableTests(WorkflowBase):
     # --- 自动勾选同名插件 ---
 
     def test_checking_a_workflow_also_checks_the_plugin_with_the_same_name(self):
@@ -193,3 +195,47 @@ class WorkflowEnableTests(TestCase):
         history = self.client.get(f"/api/sessions/{self.sid}/messages/").json()
 
         assert "格式" in history[-1]["notice"]
+
+
+class WorkflowProblemTests(WorkflowBase):
+    """工作流 schema 坏了、文件被删：勾选时和发消息时都要告诉用户，不能静默当作没勾。"""
+
+    BAD_SCHEMA = '---\nname: code-review\ndescription: d\nschema: {"type": "no-such-type"}\n---\n正文\n'
+
+    def test_checking_a_workflow_with_a_broken_schema_succeeds_but_warns(self):
+        (self.flows / "坏.md").write_bytes(self.BAD_SCHEMA.encode("utf-8"))
+
+        res = self.check_workflow("坏.md")
+
+        assert res.status_code == 200 and res.json()["enabled"] is True
+        assert "schema" in res.json()["notice"]
+
+    def test_a_broken_schema_is_not_injected(self):
+        (self.flows / "坏.md").write_bytes(self.BAD_SCHEMA.encode("utf-8"))
+        self.check_workflow("坏.md")
+        provider = RecordingProvider(text("好的"))
+
+        self.send(provider)
+
+        assert "<workflow" not in self.user_text(provider)
+
+    def test_a_checked_workflow_whose_file_was_deleted_warns_on_the_next_reply(self):
+        self.check_workflow()
+        (self.flows / "代码审查.md").unlink()
+
+        assistant = self.send(RecordingProvider(text("好的")))[1]
+
+        assert "代码审查.md" in assistant["notice"] and "不存在" in assistant["notice"]
+
+    def test_a_checked_workflow_edited_into_a_broken_schema_warns_on_the_next_reply(self):
+        self.check_workflow()
+        (self.flows / "代码审查.md").write_bytes(self.BAD_SCHEMA.encode("utf-8"))
+
+        assistant = self.send(RecordingProvider(text("好的")))[1]
+
+        assert "代码审查.md" in assistant["notice"] and "schema" in assistant["notice"]
+
+    def test_no_problem_notice_when_nothing_is_checked(self):
+        (self.flows / "代码审查.md").unlink()
+
+        assert self.send(RecordingProvider(text("好的")))[1]["notice"] is None

@@ -160,17 +160,47 @@ def _frontmatter_name(path: Path) -> str | None:
     return name or None
 
 
-def checked_workflow(session: ChatSession) -> dict | None:
-    """这个会话里勾选的那个工作流 {"file": 文件名, "name": frontmatter 的 name, "path": 路径}；没勾、文件没了或读不了就是 None。
+def _schema_problem(path: Path) -> str | None:
+    """工作流文件不能用的原因（给用户看）；能用就是 None。要有 frontmatter 的 name，schema 要是合法的 JSON Schema。"""
+    try:
+        fm = parse_frontmatter(path.read_bytes().decode("utf-8", errors="replace"))
+    except OSError:
+        return "文件读不了"
+    if not fm or not fm.get("name", "").strip():
+        return "frontmatter 缺少 name"
+    try:
+        Draft202012Validator.check_schema(json.loads(fm["schema"]))
+    except (KeyError, TypeError, ValueError, SchemaError):
+        return "frontmatter 里的 schema 不是合法的 JSON Schema"
+    return None
 
-    同时只能勾一个，所以只返回一个。
+
+def _checked_files(session: ChatSession) -> list[str]:
+    """state.json 里勾选的工作流文件名（不管文件还在不在）。"""
+    return [f for f, on in _read_state(session).items() if on]
+
+
+def checked_workflow(session: ChatSession) -> dict | None:
+    """勾选的、并且能用的那个工作流 {"file": 文件名, "name": frontmatter 的 name, "path": 路径}；没勾或不能用就是 None。
+
+    同时只能勾一个，所以只返回一个。文件被删、schema 坏了的不算能用（原因见 checked_problem）。
     """
-    state = _read_state(session)
-    for filename in [*_default_names(), *_md_names(_root(session))]:
+    for filename in _checked_files(session):
         path = _file_of(session, filename)
-        name = _frontmatter_name(path)
-        if state.get(filename) and name:
-            return {"file": filename, "name": name, "path": path}
+        if path.is_file() and _schema_problem(path) is None:
+            return {"file": filename, "name": _frontmatter_name(path), "path": path}
+    return None
+
+
+def checked_problem(session: ChatSession) -> str | None:
+    """勾选了工作流却用不了（文件被删、schema 坏了）时，给用户看的一句话；一切正常或没勾就是 None。"""
+    for filename in _checked_files(session):
+        path = _file_of(session, filename)
+        if not path.is_file():
+            return f"已勾选的工作流 {filename} 的文件已不存在，模型收不到它的输出格式。请取消勾选或重新上传。"
+        problem = _schema_problem(path)
+        if problem:
+            return f"已勾选的工作流 {filename} 不能用：{problem}，模型收不到它的输出格式。请修改后重新上传。"
     return None
 
 
@@ -224,9 +254,10 @@ def set_workflow_enabled(session: ChatSession, name: str, enabled: bool) -> dict
 
 def _enable_same_named_plugin(session: ChatSession, filename: str, services) -> str | None:
     """勾选工作流后自动勾选同名插件；返回要提醒用户的话，一切正常就是 None。"""
+    problem = _schema_problem(_file_of(session, filename))
+    if problem:
+        return f"工作流 {filename} 有问题：{problem}（需要 name、description、schema），模型收不到它的输出格式。"
     skill_name = _frontmatter_name(_file_of(session, filename))
-    if skill_name is None:
-        return f"工作流 {filename} 的 frontmatter 格式有问题（需要 name、description、schema），可能不会生效。"
     plugin = services.find_plugin_file(session, skill_name)
     if plugin is None:
         return f"没有找到名为 {skill_name} 的插件：模型会按工作流的格式输出，但缺少具体的处理说明。建议上传 name 为 {skill_name} 的插件。"

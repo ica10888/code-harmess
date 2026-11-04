@@ -107,6 +107,11 @@ def _load_registry() -> eureka_registry.Registry:
     code_review = loaded.get("code-review")
     if code_review is not None:
         code_review.chain_factory = _langchain_factory  # 它的「生成修改」阶段要调模型
+    deploy_game = loaded.get("frontend-game-deploy")
+    if deploy_game is not None:
+        deploy_game.deploy_root = settings.EUREKA_DEPLOY_DIR
+        deploy_game.public_host = settings.EUREKA_DEPLOY_HOST
+        deploy_game.start_timeout = settings.EUREKA_DEPLOY_START_TIMEOUT
     return loaded
 
 

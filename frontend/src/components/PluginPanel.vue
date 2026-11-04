@@ -87,6 +87,7 @@ async function toggle(plugin, enabled) {
     // 勾选工作流可能顺带勾上了同名插件（让插件框刷新）；后端有提醒（例如没有同名插件）就明确告诉用户
     emit('toggled')
     if (updated.notice) ElMessage({ type: 'warning', message: updated.notice, duration: 8000, showClose: true })
+    else if (isWorkflow && enabled) ElMessage.success('已启用，下一条消息起模型将按该格式输出')
   } catch (err) {
     ElMessage.error(pluginErrorMessage(err))
   } finally {

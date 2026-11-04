@@ -94,6 +94,10 @@ EUREKA_LLM = {
     "reasoning_effort": _llm("reasoning_effort", "low"),
     "timeout": float(_llm("timeout_seconds", "50")),
 }
+# deploy_game 插件：拷贝到哪里、对外用什么 ip / 域名访问（部署到服务器时改成服务器地址）
+EUREKA_DEPLOY_DIR = (BASE_DIR / config.get("eureka", "deploy_dir", fallback="deployed").strip()).resolve()
+EUREKA_DEPLOY_HOST = config.get("eureka", "deploy_host", fallback="127.0.0.1").strip() or "127.0.0.1"
+EUREKA_DEPLOY_START_TIMEOUT = config.getfloat("eureka", "deploy_start_timeout_seconds", fallback=30.0)
 EUREKA_MAX_LOG_LINES = 500  # 单个阶段最多保留的日志行数（和 eureka.webhook 的发送端上限一致）
 # 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
 HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024

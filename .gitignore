@@ -19,3 +19,4 @@ backend/storage/
 # SQLite 开了 WAL 模式后的伴生文件（运行时才有，不是数据本身）
 backend/db.sqlite3-shm
 backend/db.sqlite3-wal
+backend/deployed/
