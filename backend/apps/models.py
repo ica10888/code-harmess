@@ -27,6 +27,7 @@ class Message(models.Model):
     session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="messages")
     role = models.CharField(max_length=16, choices=ROLE_CHOICES)
     content = models.TextField()
+    notice = models.TextField(blank=True, default="")  # 给用户看的提示（例如回复没按工作流格式）；不是消息内容，不进模型上下文
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

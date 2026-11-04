@@ -46,7 +46,7 @@ const api = isWorkflow
 const plugins = ref([])
 const loading = ref(false)
 // 已勾选的数量变了就告诉父组件：聊天页据此判断「没写文字但勾了插件」时能不能发送
-const emit = defineEmits(['checked'])
+const emit = defineEmits(['checked', 'toggled'])
 watch(
   plugins,
   (list) => emit('checked', list.filter((p) => p.enabled).length),
@@ -82,7 +82,11 @@ watch(
 async function toggle(plugin, enabled) {
   busy.value = true
   try {
-    plugins.value = replaceByName(plugins.value, await api.setEnabled(props.sessionId, plugin.name, enabled))
+    const updated = await api.setEnabled(props.sessionId, plugin.name, enabled)
+    plugins.value = replaceByName(plugins.value, updated)
+    // 勾选工作流可能顺带勾上了同名插件（让插件框刷新）；后端有提醒（例如没有同名插件）就明确告诉用户
+    emit('toggled')
+    if (updated.notice) ElMessage({ type: 'warning', message: updated.notice, duration: 8000, showClose: true })
   } catch (err) {
     ElMessage.error(pluginErrorMessage(err))
   } finally {

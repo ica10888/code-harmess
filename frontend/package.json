@@ -6,7 +6,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --test src/utils/typewriter.test.js src/utils/markdown.test.js src/utils/upload.test.js src/utils/sendFlow.test.js src/utils/options.test.js src/utils/plugins.test.js src/utils/eurekaRun.test.js"
+    "test": "node --test src/utils/typewriter.test.js src/utils/markdown.test.js src/utils/upload.test.js src/utils/sendFlow.test.js src/utils/options.test.js src/utils/plugins.test.js src/utils/eurekaRun.test.js src/utils/lastSession.test.js"
   },
   "dependencies": {
     "axios": "^1.6.2",

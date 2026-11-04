@@ -77,7 +77,8 @@ def _agent(session, model: str | None = None) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 
     读写文件的工具被限制在这个会话自己的工作区里（tools.workspace_tools），模型碰不到别的会话和项目文件。
-    run_bash 不提供：它能跑任意命令，限制不住目录；网页里也没人能点「允许」，approve 一律拒绝作为兜底。
+    run_bash 也提供（工作区版，不审批，工作目录是工作区）：它能跑任意命令，限不住目录，等于信任模型和用户；
+    网页里没人能点「允许」，其余要审批的工具 approve 一律拒绝作为兜底。
     get_user_input 不会被用到（respond 不读输入），传个返回 None 的占位，免得它去建终端输入框。
     """
     allowed = [t for t in workspace_tools(workspace_dir(session)) if t.name in settings.HARNESS_TOOLS]
@@ -134,7 +135,10 @@ def skills_message_for(session) -> str | None:
     message, warnings = skills_message(paths)
     for warning in warnings:
         logger.warning("session %s: %s", session.id, warning)
-    return message
+    from . import workflows  # 同上，避免循环导入
+
+    workflow = workflows.workflow_message(session, already)  # 勾选的工作流：把输出格式也告诉模型
+    return "\n\n".join(m for m in (message, workflow) if m) or None
 
 
 def run_turn(session, user_text: str, model: str | None = None, effort: str | None = None) -> str:

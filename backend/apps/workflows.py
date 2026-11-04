@@ -144,8 +144,61 @@ def create_workflow(session: ChatSession, uploaded) -> dict:
     return workflow
 
 
+def _file_of(session: ChatSession, filename: str) -> Path:
+    """工作流文件名对应的路径（默认的优先）。"""
+    default = _default_path(filename)
+    return default if default is not None else _root(session) / filename
+
+
+def _frontmatter_name(path: Path) -> str | None:
+    """工作流 frontmatter 的 name；读不了或没有就是 None。"""
+    try:
+        fm = parse_frontmatter(path.read_bytes().decode("utf-8", errors="replace"))
+    except OSError:
+        return None
+    name = (fm or {}).get("name", "").strip()
+    return name or None
+
+
+def checked_workflow(session: ChatSession) -> dict | None:
+    """这个会话里勾选的那个工作流 {"file": 文件名, "name": frontmatter 的 name, "path": 路径}；没勾、文件没了或读不了就是 None。
+
+    同时只能勾一个，所以只返回一个。
+    """
+    state = _read_state(session)
+    for filename in [*_default_names(), *_md_names(_root(session))]:
+        path = _file_of(session, filename)
+        name = _frontmatter_name(path)
+        if state.get(filename) and name:
+            return {"file": filename, "name": name, "path": path}
+    return None
+
+
+def workflow_message(session: ChatSession, already: str) -> str | None:
+    """勾选的工作流合成一条要注入的消息：全文 + 输出要求。already 是对话里已有的用户消息文字，已经注入过就不再注入。"""
+    checked = checked_workflow(session)
+    if checked is None or f'<workflow name="{checked["name"]}">' in already:
+        return None
+    body = checked["path"].read_bytes().decode("utf-8", errors="replace")
+    return (
+        "The user enabled the workflow below for this conversation. Its frontmatter contains the JSON Schema "
+        "of the result, so the schema IS available: do not say it is missing. When the user asks for what the "
+        f"plugin named {checked['name']} does and gives the input it needs, reply with exactly one JSON value "
+        "that validates against that schema, inside a ```json fenced block, with no other explanation. If the "
+        "input is missing (for example no code to review), ask the user for it instead of refusing or inventing "
+        "anything.\n\n"
+        f'<workflow name="{checked["name"]}">\n{body}\n</workflow>'
+    )
+
+
 def set_workflow_enabled(session: ChatSession, name: str, enabled: bool) -> dict:
-    """勾选 / 取消勾选。默认工作流也可以勾选，状态记在这个会话自己的 state.json 里。"""
+    """勾选 / 取消勾选。默认工作流也可以勾选，状态记在这个会话自己的 state.json 里。
+
+    同时只能勾一个（已经勾了别的就 409）。勾选时自动勾上同名（frontmatter name 相同）的插件；
+    找不到同名插件、或工作流文件有问题时，勾选照样成功，返回里带 notice 告诉用户。取消勾选不动插件。
+    """
+    from . import services  # 同 harness：避免循环导入
+
     default = _default_path(name)
     if default is not None:
         name, is_default = default.name, True
@@ -154,11 +207,34 @@ def set_workflow_enabled(session: ChatSession, name: str, enabled: bool) -> dict
             raise PluginError(f"找不到工作流 {name}", status=404)
         is_default = False
     state = _read_state(session)
+    if enabled:
+        other = next((f for f in [*_default_names(), *_md_names(_root(session))] if f != name and state.get(f)), None)
+        if other:
+            raise PluginError(f"同时只能勾选一个工作流，请先取消勾选 {other}", status=409)
     state[name] = enabled
     _write_state(session, state)
     workflow = _workflow(name, state, default=is_default)
     apply_to_core("updated", session, workflow)
+    if enabled:
+        notice = _enable_same_named_plugin(session, name, services)
+        if notice:
+            workflow["notice"] = notice
     return workflow
+
+
+def _enable_same_named_plugin(session: ChatSession, filename: str, services) -> str | None:
+    """勾选工作流后自动勾选同名插件；返回要提醒用户的话，一切正常就是 None。"""
+    skill_name = _frontmatter_name(_file_of(session, filename))
+    if skill_name is None:
+        return f"工作流 {filename} 的 frontmatter 格式有问题（需要 name、description、schema），可能不会生效。"
+    plugin = services.find_plugin_file(session, skill_name)
+    if plugin is None:
+        return f"没有找到名为 {skill_name} 的插件：模型会按工作流的格式输出，但缺少具体的处理说明。建议上传 name 为 {skill_name} 的插件。"
+    for other in services.list_plugins(session):  # 只留同名插件：其他勾选的都取消，避免无关插件一起注入
+        if other["enabled"] and other["name"] != plugin:
+            services.set_plugin_enabled(session, other["name"], False)
+    services.set_plugin_enabled(session, plugin, True)
+    return None
 
 
 def delete_workflow(session: ChatSession, name: str) -> None:

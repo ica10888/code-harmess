@@ -22,11 +22,15 @@ class ChatSessionSerializer(serializers.ModelSerializer):
 class MessageSerializer(serializers.ModelSerializer):
     # 这条消息有 eureka 时刻就带上 {"text": ...}，没有就是 null。它只是展示用的，不是消息内容，不会进模型上下文
     eureka = serializers.SerializerMethodField()
+    notice = serializers.SerializerMethodField()  # 给用户看的提示，没有就是 null
 
     class Meta:
         model = Message
-        fields = ["id", "role", "content", "created_at", "eureka"]
+        fields = ["id", "role", "content", "created_at", "eureka", "notice"]
         read_only_fields = fields
+
+    def get_notice(self, message):
+        return message.notice or None
 
     def get_eureka(self, message):
         eureka = getattr(message, "eureka", None)  # 反向一对一：没有就是 None（这里不会触发额外查询报错）
@@ -50,6 +54,7 @@ class PluginSerializer(serializers.Serializer):
     name = serializers.CharField(read_only=True)
     enabled = serializers.BooleanField()
     default = serializers.BooleanField(read_only=True)  # 默认插件：所有会话都有，不能删除
+    notice = serializers.CharField(read_only=True, required=False)  # 勾选后的提醒（例如工作流没有同名插件）；没有就不出现
 
 
 class PluginDetailSerializer(PluginSerializer):

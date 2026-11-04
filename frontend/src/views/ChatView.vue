@@ -8,6 +8,7 @@ import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ModelPicker from '../components/ModelPicker.vue'
 import PluginPanel from '../components/PluginPanel.vue'
+import { loadLastSession, pickSession, saveLastSession } from '../utils/lastSession'
 import { buildSendOptions } from '../utils/options'
 import { sendWithAttachment } from '../utils/sendFlow'
 import { createTypewriter } from '../utils/typewriter'
@@ -21,6 +22,7 @@ const pendingFile = ref(null) // 已选好、还没上传的文件；点「发�
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
+const pluginReload = ref(0) // 勾选工作流可能自动勾上同名插件：加一，让插件框重新加载
 const checkedPlugins = ref(0) // 当前会话已勾选的插件数；勾了插件即使不写文字也能发送
 // 没写文字、但上传了文件或勾了插件时，用这句话代替，让模型照着去做
 const DEFAULT_TEXT = '请根据我上传的文件和勾选的插件开始。'
@@ -50,6 +52,7 @@ function addMessages(incoming) {
 async function selectSession(id) {
   if (closeStream) closeStream()
   currentId.value = id
+  saveLastSession(id) // 刷新后回到这个会话
   pendingFile.value = null // 选好还没传的文件属于原来的会话，不能带到新会话里
   messages.value = []
   addMessages(await listMessages(id))
@@ -158,7 +161,8 @@ async function streamReply(content, options) {
 
 onMounted(async () => {
   sessions.value = await listSessions()
-  if (sessions.value.length) await selectSession(sessions.value[0].id)
+  const id = pickSession(sessions.value, loadLastSession())
+  if (id) await selectSession(id)
   else await newSession()
 })
 onBeforeUnmount(() => closeStream && closeStream())
@@ -187,6 +191,8 @@ onBeforeUnmount(() => closeStream && closeStream())
           <div class="bubble">{{ m.content }}</div>
           <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
           <EurekaBanner v-if="m.eureka" :text="m.eureka.text" />
+          <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
+          <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
           <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->
           <EurekaRunPanel
             v-if="m.eureka?.run && currentId"
@@ -238,8 +244,8 @@ onBeforeUnmount(() => closeStream && closeStream())
         {{ rightCollapsed ? '‹' : '›' }}
       </el-button>
       <div v-show="!rightCollapsed" class="panels">
-        <PluginPanel :session-id="currentId" @checked="(n) => (checkedPlugins = n)" />
-        <PluginPanel :session-id="currentId" kind="workflow" />
+        <PluginPanel :key="pluginReload" :session-id="currentId" @checked="(n) => (checkedPlugins = n)" />
+        <PluginPanel :session-id="currentId" kind="workflow" @toggled="pluginReload++" />
       </div>
     </aside>
   </div>
@@ -321,6 +327,17 @@ onBeforeUnmount(() => closeStream && closeStream())
   text-align: center;
   color: #909399;
   margin-top: 48px;
+}
+.notice {
+  align-self: flex-start;
+  max-width: 70%;
+  margin-top: 6px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #fdf6ec;
+  color: #b88230;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .row {
   display: flex;

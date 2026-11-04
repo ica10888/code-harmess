@@ -67,6 +67,18 @@ def used_plugin_names(session: ChatSession) -> list[str]:
     return names
 
 
+def find_plugin_file(session: ChatSession, skill_name: str) -> str | None:
+    """frontmatter 的 name 等于 skill_name 的插件的文件名（默认插件在前）；没有就是 None。读不了的插件跳过。"""
+    candidates = [(_default_root() / n, n) for n in _default_names()] + [(_root(session) / n, n) for n in _md_names(_root(session))]
+    for path, filename in candidates:
+        try:
+            if load_skill_file(str(path)).name == skill_name:
+                return filename
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def save_assistant_message(session: ChatSession, reply: str) -> Message:
     """存下模型的回复；如果这一轮是 eureka 时刻，同时存一条 Eureka（单独的表，不进上下文）。
 
@@ -77,6 +89,11 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
         from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
 
         hit = workflows.match_eureka(session, used_plugin_names(session), reply)
+        if not hit:
+            checked = workflows.checked_workflow(session)
+            if checked:  # 用户勾了工作流，这一轮却没按它的格式回复：告诉用户为什么没有 eureka
+                message.notice = f"这次回复没有按工作流 {checked['name']} 的格式输出，所以没有触发 eureka。可以补充要处理的内容后重试。"
+                message.save(update_fields=["notice"])
         if hit:
             eureka = Eureka.objects.create(
                 message=message, plugin=hit["plugin"], workflow=hit["workflow"], text=workflows.eureka_text()
