@@ -223,13 +223,16 @@ BASH_TIMEOUT = 30  # 秒
 MAX_OUTPUT_CHARS = 10_000  # 超长输出会塞爆上下文；保留结尾，因为报错、测试失败、堆栈都在最后
 
 
-def _run_bash(args: dict[str, Any]) -> str:
+APPROVAL_NOTE = "The user must approve every command before it runs."
+
+
+def _run_bash(args: dict[str, Any], cwd: str | None = None) -> str:
     command = args["command"]
     try:
         # start_new_session：命令跑在独立进程组里，超时能连孙进程一起杀；
         # 只杀 sh 的话，孙进程还握着 stdout 管道，communicate() 会一直等下去。
         proc = subprocess.Popen(
-            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True
+            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True, cwd=cwd
         )
     except OSError as e:
         raise ToolError(str(e)) from e
@@ -257,7 +260,7 @@ run_bash = Tool(
         "Use this to run programs and tests, or for things the other tools can't do. "
         f"Commands time out after {BASH_TIMEOUT} seconds, so don't start servers or interactive programs. "
         f"Output longer than {MAX_OUTPUT_CHARS} characters is cut to its last {MAX_OUTPUT_CHARS} characters. "
-        "The user must approve every command before it runs."
+        f"{APPROVAL_NOTE}"
     ),
     input_schema={
         "type": "object",
@@ -291,10 +294,11 @@ def _resolve_in(root: str, path: str) -> str:
 
 
 def workspace_tools(root: str) -> list[Tool]:
-    """read_file / list_files / edit_file 的工作区版：路径都相对于 root，碰不到 root 以外的任何东西。
+    """read_file / list_files / edit_file / run_bash 的工作区版：路径都相对于 root，碰不到 root 以外的任何东西。
 
     只换路径，不动原工具的逻辑（分页、截断、唯一匹配……全部沿用）。root 第一次用到时才创建。
-    没有 run_bash：它能跑任意命令，限制不住路径。
+    run_bash 也在里面：命令的工作目录是 root，但它能跑任意命令，限制不住路径，只是起点在 root。
+    网页里没人能点「允许」，所以这个版本不需要审批（描述里「需要用户批准」那句也去掉）。
     """
 
     def scoped(tool: Tool, key: str, default: str = ".") -> Tool:
@@ -305,4 +309,15 @@ def workspace_tools(root: str) -> list[Tool]:
 
         return replace(tool, run=run)
 
-    return [scoped(read_file, "path"), scoped(list_files, "path"), scoped(edit_file, "path")]
+    def bash_run(args: dict[str, Any]) -> str:
+        os.makedirs(root, exist_ok=True)
+        return _run_bash(args, cwd=root)
+
+    bash = replace(
+        run_bash,
+        run=bash_run,
+        needs_approval=False,
+        description=run_bash.description.replace(APPROVAL_NOTE, "").strip(),
+        summary_zh="在会话工作区里运行一条命令（网页里不需要审批，30 秒超时）",
+    )
+    return [scoped(read_file, "path"), scoped(list_files, "path"), scoped(edit_file, "path"), bash]

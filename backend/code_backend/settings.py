@@ -96,8 +96,8 @@ EUREKA_MAX_LOG_LINES = 500  # 单个阶段最多保留的日志行数（和 eure
 # 单个上传文件的大小上限（字节）。Django 默认把超过 2.5MB 的请求体写临时文件、不会拒绝，所以我们自己检查
 HARNESS_MAX_UPLOAD_BYTES = config.getint("storage", "max_upload_mb", fallback=20) * 1024 * 1024
 
-# Harness：网页里没人能点「允许」，所以默认只给只读工具；run_bash 这类要审批的工具即使加进来也会被拒绝
-HARNESS_TOOLS = ["read_file", "list_files"]
+# Harness：网页里没人能点「允许」，所以工作区版的 run_bash 不审批；其余需要审批的工具仍会被拒绝
+HARNESS_TOOLS = ["read_file", "list_files", "edit_file", "run_bash"]
 HARNESS_MAX_TOOL_ROUNDS = 20  # 一句话之后最多连续几轮工具调用
 HARNESS_CONTEXT_BUDGET = 60_000  # 上一次请求的输入超过它，就把旧工具结果换成占位符
 HARNESS_KEEP_TOOL_RESULTS = 5

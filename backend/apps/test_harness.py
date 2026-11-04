@@ -90,27 +90,25 @@ class RunTurnTests(TestCase):
         assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "c1"
         assert "secret-content" in tool_message["content"]
 
-    def test_model_only_gets_read_only_tools_and_a_web_prompt(self):
+    def test_model_gets_all_workspace_tools_and_a_web_prompt(self):
         provider = FakeProvider(text("ok"))
         run(provider)
-        assert provider.calls[0]["tools"] == ["read_file", "list_files"]  # 默认只读：没有 edit_file
+        assert provider.calls[0]["tools"] == ["read_file", "list_files", "edit_file", "run_bash"]
         system = provider.calls[0]["system"]
         assert "web chat page" in system and "read_file" in system
-        assert "edit_file" not in system and "run_bash" not in system  # 提示词里也不提没给的工具
+        assert "edit_file" in system and "run_bash" in system
 
     def test_tool_outside_the_allowed_list_comes_back_as_an_error_result(self):
-        provider = FakeProvider(calls(ToolCall("c1", "run_bash", {"command": "echo hi"})), text("好吧"))
+        provider = FakeProvider(calls(ToolCall("c1", "no_such_tool", {})), text("好吧"))
         _, reply = run(provider)
         assert reply == "好吧"  # 循环没有崩
-        assert "unknown tool: run_bash" in provider.calls[1]["conversation"][-1]["content"]
+        assert "unknown tool: no_such_tool" in provider.calls[1]["conversation"][-1]["content"]
 
-    def test_tool_needing_approval_is_not_available_even_if_the_model_asks_for_it(self):
-        # run_bash 不在工作区工具里：配置里写了也不提供；模型自己硬要调，得到的是 unknown tool 错误，循环不会崩
-        provider = FakeProvider(calls(ToolCall("c1", "run_bash", {"command": "echo hi"})), text("好吧"))
-        with override_settings(HARNESS_TOOLS=["read_file", "run_bash"]):
-            _, reply = run(provider)
-        assert reply == "好吧"
-        assert "unknown tool: run_bash" in provider.calls[1]["conversation"][-1]["content"]
+    def test_run_bash_runs_without_asking_for_approval(self):
+        provider = FakeProvider(calls(ToolCall("c1", "run_bash", {"command": "echo hi"})), text("好了"))
+        _, reply = run(provider)
+        assert reply == "好了"
+        assert "hi" in provider.calls[1]["conversation"][-1]["content"]
 
     def test_endless_tool_calls_pause_after_the_round_limit_with_every_call_answered(self):
         looping = [calls(ToolCall(f"c{i}", "list_files", {"path": "."})) for i in range(3)]
@@ -375,8 +373,8 @@ class WorkspaceTests(TestCase):
             run(provider)
         assert provider.calls[0]["tools"] == ["read_file", "list_files"]
 
-    def test_run_bash_is_never_offered_even_if_configured(self):
+    def test_run_bash_is_only_offered_when_configured(self):
         with override_settings(HARNESS_TOOLS=["read_file", "run_bash"]):
             provider = FakeProvider(text("ok"))
             run(provider)
-        assert provider.calls[0]["tools"] == ["read_file"]  # 它跑任意命令，限制不住目录
+        assert provider.calls[0]["tools"] == ["read_file", "run_bash"]

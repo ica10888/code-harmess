@@ -235,14 +235,21 @@ def _ws(tmp_path):
 
 def test_workspace_tools_keep_the_names_schemas_and_order_of_the_originals(tmp_path):
     ws = tools.workspace_tools(str(tmp_path))
-    assert [t.name for t in ws] == ["read_file", "list_files", "edit_file"]
+    assert [t.name for t in ws] == ["read_file", "list_files", "edit_file", "run_bash"]
     for t in ws:
         original = next(o for o in ALL_TOOLS if o.name == t.name)
-        assert (t.description, t.input_schema, t.needs_approval) == (
-            original.description,
-            original.input_schema,
-            original.needs_approval,
-        )
+        assert t.input_schema == original.input_schema
+        if t.name != "run_bash":  # run_bash 在网页里不审批，描述也相应改了
+            assert (t.description, t.needs_approval) == (original.description, original.needs_approval)
+
+
+def test_workspace_run_bash_needs_no_approval_and_runs_inside_the_workspace(tmp_path):
+    bash = _ws(tmp_path)["run_bash"]
+    assert not bash.needs_approval and "approve" not in bash.description
+
+    bash.run({"command": "echo hi > made.txt"})
+
+    assert (tmp_path / "ws" / "made.txt").exists()  # 命令的工作目录是工作区，不是服务进程所在目录
 
 
 def test_workspace_directory_is_created_on_first_use(tmp_path):
