@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
 import FileChangeBanner from '../components/FileChangeBanner.vue'
+import WaitingHint from '../components/WaitingHint.vue'
 import SkillSelectionBanner from '../components/SkillSelectionBanner.vue'
 import EurekaRunPanel from '../components/EurekaRunPanel.vue'
 import FileUploadButton from '../components/FileUploadButton.vue'
@@ -30,6 +31,7 @@ const pendingFile = ref(null) // 已选好、还没上传的文件；点「发�
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
+const waitingId = ref(null) // 正在等回复的会话 id；等到第一段回复（或出错）就清空
 // 没写文字、但上传了文件时，用这句话代替，让模型照着去做
 const DEFAULT_TEXT = '请根据我上传的文件开始。'
 const rightCollapsed = ref(false) // 右栏（插件 + 工作流）是否收起（宽屏用）
@@ -170,6 +172,7 @@ async function streamReply(content, options) {
   // 正在长出来的回复：先用一条临时消息（id 取 Infinity，排在最后），done 到来时换成存好的真消息。
   // live 必须是 messages.value 里取回的响应式代理：改 push 之前的原对象，Vue 看不到，界面不会刷新。
   const sessionId = currentId.value // 回复期间用户可能切走，标题要改在发送时的那个会话上
+  waitingId.value = sessionId
   let live = null
   // delta 到达的节奏不均匀，交给打字机匀到每一帧，每帧最多更新一次界面
   const typewriter = createTypewriter((text) => {
@@ -177,6 +180,7 @@ async function streamReply(content, options) {
     scrollToBottom()
   })
   const dropLive = () => {
+    waitingId.value = null
     typewriter.cancel()
     if (live) messages.value.splice(messages.value.indexOf(live), 1)
     live = null
@@ -194,9 +198,11 @@ async function streamReply(content, options) {
         user: (m) => {
           addMessages([m])
           scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
+          nextTick(() => scrollToBottom({ force: true })) // 等待提示也要露出来
         },
         delta: ({ text }) => {
           if (!live) {
+            waitingId.value = null
             messages.value.push({ id: Infinity, role: 'assistant', content: '' })
             live = messages.value[messages.value.length - 1]
           }
@@ -317,6 +323,10 @@ onBeforeUnmount(() => closeStream && closeStream())
             @update="onRunUpdate"
             @finished="onRunFinished"
           />
+        </div>
+        <!-- 等模型回复：随机词 + ...，第一段回复到来后就被真正的回复替换 -->
+        <div v-if="waitingId && waitingId === currentId" class="row assistant">
+          <WaitingHint :key="waitingId" />
         </div>
       </div>
 
