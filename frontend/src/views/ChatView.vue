@@ -994,7 +994,7 @@ onBeforeUnmount(() => closeStream && closeStream())
     min-width: 0;
   }
   .session-select {
-    width: 104px;
+    width: 52px;
     flex-shrink: 0;
   }
   /* 标签之间的间距（默认 36px，是组件内联的变量，覆盖不了）收小：改垫片宽度，360px 宽的手机上三个标签才放得下 */
