@@ -254,6 +254,25 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
   line-height: 1.5;
   padding: 5px;
 }
+/* 代码不换行：否则折行后和行号对不上。容器随最长的一行变宽，外层 .editor 横向滚动；行号固定在左边 */
+.editor :deep(.prism-editor__container) {
+  width: max-content;
+  min-width: 100%;
+  overflow: visible;
+}
+.editor :deep(.prism-editor__editor),
+.editor :deep(.prism-editor__textarea) {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+.editor :deep(.prism-editor__line-numbers) {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: #f6f8fa;
+  padding-right: 6px;
+  margin-right: 4px;
+}
 .editor :deep(textarea:focus) {
   outline: none;
 }

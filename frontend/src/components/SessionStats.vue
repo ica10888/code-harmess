@@ -58,7 +58,7 @@ const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits
       <span class="counts" role="button" title="点击查看会话统计"><span class="full">{{ label }}</span><span class="short">统计</span></span>
     </template>
     <div class="title">
-      <span>会话统计</span>
+      <span>会话统计<span class="title-counts">（{{ label }}）</span></span>
       <el-button size="small" link type="primary" @click="openDetail">明细</el-button>
     </div>
     <template v-if="stats">
@@ -138,11 +138,21 @@ const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits
 .short {
   display: none;
 }
+/* 窄屏输入框下只剩「统计」，所以把计数文字补在弹窗标题后面 */
+.title-counts {
+  display: none;
+  font-size: 12px;
+  font-weight: normal;
+  color: #909399;
+}
 @media (max-width: 768px) {
   .full {
     display: none;
   }
   .short {
+    display: inline;
+  }
+  .title-counts {
     display: inline;
   }
 }

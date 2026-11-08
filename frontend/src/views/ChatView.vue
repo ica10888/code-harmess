@@ -47,8 +47,14 @@ const view = ref('chat') // sessions | chat | plugins（插件和工作流合在
 const tab = ref('chat') // 会话框上面的标签：chat（对话）| workspace（工作区）| preview（预览）
 const previewLinks = ref([]) // 预览页要内嵌的链接：取编号最大（最新）那次工作流运行日志里的
 let previewRunId = 0
+const previewPane = ref(null)
 const openTarget = ref(null) // 要在工作区打开的文件 { path }
 const listEl = ref(null)
+
+// 窄屏悬浮按钮：再点一次当前所在的会话列表 / 插件页，收起它回到对话页
+function toggleView(target) {
+  view.value = view.value === target && target !== 'chat' ? 'chat' : target
+}
 
 let closeStream = null
 
@@ -98,6 +104,14 @@ function onRunUpdate(run) {
   if (run.id < previewRunId || !links.length) return
   previewRunId = run.id
   if (links.join() !== previewLinks.value.join()) previewLinks.value = links
+}
+
+/** 点了日志里的访问地址：在预览页新建一个页面并跳转过去显示。 */
+async function openInPreview(link) {
+  if (!previewLinks.value.includes(link)) previewLinks.value = [...previewLinks.value, link]
+  tab.value = 'preview'
+  await nextTick()
+  previewPane.value?.open(link)
 }
 
 /** 工作流刚完成：有链接就跳到预览页。 */
@@ -256,7 +270,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         class="fab"
         :type="view === f.view ? 'primary' : 'default'"
         :title="f.title"
-        @click="view = f.view"
+        @click="toggleView(f.view)"
       >
         {{ f.icon }}
       </el-button>
@@ -269,7 +283,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         class="fab"
         :type="view === f.view ? 'primary' : 'default'"
         :title="f.title"
-        @click="view = f.view"
+        @click="toggleView(f.view)"
       >
         {{ f.icon }}
       </el-button>
@@ -294,7 +308,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         </el-select>
       </div>
 
-      <PreviewPane v-show="tab === 'preview'" :links="previewLinks" />
+      <PreviewPane ref="previewPane" v-show="tab === 'preview'" :links="previewLinks" />
       <WorkspaceBrowser v-if="tab === 'workspace'" :session-id="currentId" :target="openTarget" />
       <div v-show="tab === 'chat'" ref="listEl" class="messages">
         <div v-if="!messages.length" class="empty">发送第一条消息，开始对话</div>
@@ -322,6 +336,7 @@ onBeforeUnmount(() => closeStream && closeStream())
             :initial-status="m.eureka.run.status"
             @update="onRunUpdate"
             @finished="onRunFinished"
+            @open-link="openInPreview"
           />
         </div>
         <!-- 等模型回复：随机词 + ...，第一段回复到来后就被真正的回复替换 -->

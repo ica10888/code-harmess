@@ -40,6 +40,15 @@ function tabTitle(link) {
   }
 }
 
+/** 从外面（工作流进度里点了链接）打开一个页面：被关掉过的重新显示，并切到它。 */
+function open(link) {
+  const next = new Set(closed.value)
+  next.delete(link)
+  closed.value = next
+  selected.value = link
+}
+defineExpose({ open })
+
 const refresh = () => (reloads.value[selected.value] = (reloads.value[selected.value] ?? 0) + 1)
 
 // 被嵌页面和本页面同源时，不能同时给 allow-scripts 和 allow-same-origin，否则它能摘掉沙箱；跨源则可以，页面才能正常用 localStorage 等

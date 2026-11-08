@@ -5,8 +5,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getEurekaRun } from '../api'
 import { STATUS_LABEL, isFinished, nextDelay, progressSummary, shouldPoll, splitLinks, stageIcon } from '../utils/eurekaRun'
 
-// update：每次拉到进度都通知上层（预览页靠它收集链接）；finished：亲眼看到它从未结束变成 done 时通知一次（预览页靠它跳转）
-const emit = defineEmits(['update', 'finished'])
+// open-link：点了日志里的链接，交给上层在预览页新建页面显示；update：每次拉到进度都通知上层（预览页靠它收集链接）；finished：亲眼看到它从未结束变成 done 时通知一次（预览页靠它跳转）
+const emit = defineEmits(['update', 'finished', 'open-link'])
 const props = defineProps({
   sessionId: { type: String, required: true },
   runId: { type: Number, required: true },
@@ -65,7 +65,7 @@ onBeforeUnmount(() => {
           <ul v-if="s.logs.length" class="logs">
             <li v-for="(line, i) in s.logs" :key="i">
               <template v-for="(part, j) in splitLinks(line)" :key="j">
-                <a v-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
+                <a v-if="part.href" :href="part.href" @click.prevent="emit('open-link', part.href)">{{ part.text }}</a>
                 <template v-else>{{ part.text }}</template>
               </template>
             </li>
