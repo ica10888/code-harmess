@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { NButton, NInput, NSelect, NTabPane, NTabs } from 'naive-ui'
 import { message } from '../utils/feedback'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
@@ -7,14 +7,15 @@ import EurekaBanner from '../components/EurekaBanner.vue'
 import FileChangeBanner from '../components/FileChangeBanner.vue'
 import WaitingHint from '../components/WaitingHint.vue'
 import SkillSelectionBanner from '../components/SkillSelectionBanner.vue'
-import EurekaRunPanel from '../components/EurekaRunPanel.vue'
-import FileUploadButton from '../components/FileUploadButton.vue'
-import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ModelPicker from '../components/ModelPicker.vue'
-import PreviewPane from '../components/PreviewPane.vue'
-import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
-import PluginPanel from '../components/PluginPanel.vue'
-import SessionStats from '../components/SessionStats.vue'
+// 非首屏必需的组件异步加载：工作区（含代码编辑器）、预览、会话统计、进度面板、插件面板、输入预览、上传按钮
+const EurekaRunPanel = defineAsyncComponent(() => import('../components/EurekaRunPanel.vue'))
+const PreviewPane = defineAsyncComponent(() => import('../components/PreviewPane.vue'))
+const WorkspaceBrowser = defineAsyncComponent(() => import('../components/WorkspaceBrowser.vue'))
+const PluginPanel = defineAsyncComponent(() => import('../components/PluginPanel.vue'))
+const MarkdownPreview = defineAsyncComponent(() => import('../components/MarkdownPreview.vue'))
+const FileUploadButton = defineAsyncComponent(() => import('../components/FileUploadButton.vue'))
+const SessionStats = defineAsyncComponent(() => import('../components/SessionStats.vue'))
 import { loadLastSession, pickSession, saveLastSession } from '../utils/lastSession'
 import { extractLinks } from '../utils/eurekaRun'
 import { buildSendOptions } from '../utils/options'
