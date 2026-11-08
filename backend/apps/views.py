@@ -5,7 +5,7 @@ import time
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.http import Http404, StreamingHttpResponse
+from django.http import Http404, HttpResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
@@ -187,6 +187,59 @@ class WorkspaceFileContentView(APIView):
         if not ok:
             raise Http404
         return Response({"path": request.data["path"]})
+
+
+def parse_range(header: str, size: int) -> tuple[int, int] | None:
+    """解析 `bytes=a-b` / `bytes=a-` / `bytes=-n`，返回闭区间 (start, end)；格式不对或越界返回 None。"""
+    try:
+        unit, _, spec = header.partition("=")
+        first, _, last = spec.strip().partition("-")
+        if unit.strip() != "bytes" or "," in spec:
+            return None
+        if first == "":  # 最后 n 个字节
+            start, end = max(size - int(last), 0), size - 1
+        else:
+            start, end = int(first), int(last) if last else size - 1
+    except ValueError:
+        return None
+    end = min(end, size - 1)
+    return (start, end) if 0 <= start <= end else None
+
+
+def iter_file(path, start: int, end: int, chunk: int = 64 * 1024):
+    with open(path, "rb") as f:
+        f.seek(start)
+        left = end - start + 1
+        while left > 0 and (data := f.read(min(chunk, left))):
+            left -= len(data)
+            yield data
+
+
+class WorkspaceMediaView(APIView):
+    """查看本会话工作区里的图片/视频原文件：?path=<相对路径>。支持 Range，视频才能拖动进度条。"""
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        media = services.workspace_media(session, request.query_params.get("path", ""))
+        if media is None:
+            raise Http404
+        path, content_type = media
+        size = path.stat().st_size
+        header = request.headers.get("Range")
+        byte_range = parse_range(header, size) if header else None
+        if header and byte_range is None:
+            response = HttpResponse(status=416)
+            response["Content-Range"] = f"bytes */{size}"
+        else:
+            start, end = byte_range or (0, size - 1)
+            response = StreamingHttpResponse(iter_file(path, start, end), content_type=content_type, status=206 if byte_range else 200)
+            response["Content-Length"] = str(end - start + 1) if size else "0"
+            if byte_range:
+                response["Content-Range"] = f"bytes {start}-{end}/{size}"
+        response["Accept-Ranges"] = "bytes"
+        response["X-Content-Type-Options"] = "nosniff"
+        response["Content-Security-Policy"] = "sandbox"  # SVG 被直接打开时也不能执行脚本
+        return response
 
 
 class PluginListView(APIView):

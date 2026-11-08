@@ -181,6 +181,44 @@ def read_workspace_file(session: ChatSession, rel_path: str) -> dict | None:
     }
 
 
+# 能在浏览器里直接查看的图片、视频和音频格式（后缀 → Content-Type）；不依赖系统的 mimetypes 注册表
+MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".avif": "image/avif",
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".webm": "video/webm",
+    ".ogv": "video/ogg",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+}
+
+
+def workspace_media(session: ChatSession, rel_path: str) -> tuple[Path, str] | None:
+    """工作区里一个图片/视频文件 → (绝对路径, Content-Type)；不存在、跑出工作区或不是媒体格式就是 None。"""
+    content_type = MEDIA_TYPES.get(Path(rel_path).suffix.lower())
+    root = Path(harness.workspace_dir(session)).resolve()
+    path = (root / rel_path).resolve()
+    if content_type is None or not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path, content_type
+
+
 def write_workspace_file(session: ChatSession, rel_path: str, content: str) -> bool:
     """覆盖工作区里一个已有文件的文本内容；不存在或跑出工作区返回 False。内容超过 MAX_VIEW_BYTES 抛 ValueError。
 

@@ -128,3 +128,7 @@ export const getRequestContent = (sessionId, requestId) =>
 /** 保存工作区里一个已有文件的新内容（覆盖）。 */
 export const writeWorkspaceFile = (sessionId, path, content) =>
   http.put(`/sessions/${sessionId}/workspace/file/`, { path, content }).then((r) => r.data)
+
+// 图片/视频直接给 <img>/<video> 的 src 用：浏览器自己带 cookie 和 Range 请求，不走 axios
+export const workspaceMediaUrl = (sessionId, path) =>
+  `/api/sessions/${sessionId}/workspace/media/?path=${encodeURIComponent(path)}&t=${Date.now()}`

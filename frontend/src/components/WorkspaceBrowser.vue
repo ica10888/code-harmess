@@ -2,18 +2,19 @@
 // 工作区标签页：左边目录树，右边打开即可编辑的代码框（Prism 高亮，Ctrl+S 保存覆盖原文件）。路径由后端固定为本会话的工作区。
 import { ref, watch, computed, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile } from '../api'
+import { listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile, workspaceMediaUrl } from '../api'
 import { PrismEditor } from 'vue-prism-editor'
 import 'vue-prism-editor/dist/prismeditor.min.css'
 import 'prismjs/themes/prism.css'
 import { highlightFile } from '../utils/highlight'
 import { buildTree } from '../utils/workspaceTree'
+import { mediaKind } from '../utils/mediaKind'
 
 // target：外部要求打开的文件 { path }；每次都传新对象，重复点同一个文件也会重新打开
 const props = defineProps({ sessionId: { type: String, default: null }, target: { type: Object, default: null } })
 
 const tree = ref([])
-const current = ref(null) // { path, content, truncated }
+const current = ref(null) // { path, content, truncated }；图片/视频/音频没有 content，多一个 media: { kind, url }
 const draft = ref('') // 编辑框里的内容；打开文件时等于文件内容
 const saving = ref(false)
 
@@ -34,7 +35,7 @@ async function refresh() {
     if (sessionId !== props.sessionId) return // 请求期间切了会话
     tree.value = buildTree(files)
     const open = current.value
-    if (open && !dirty.value && files.some((f) => f.path === open.path)) {
+    if (open && !open.media && !dirty.value && files.some((f) => f.path === open.path)) {
       const fresh = await readWorkspaceFile(sessionId, open.path)
       // 读的期间用户可能切了文件或开始输入，这时丢掉结果
       if (current.value === open && !dirty.value && fresh.content !== open.content) {
@@ -65,6 +66,13 @@ async function confirmDiscard() {
 
 async function openFile(path) {
   if (!(await confirmDiscard())) return
+  const kind = mediaKind(path)
+  if (kind) {
+    // 图片/视频/音频不读文本，直接让浏览器按地址加载
+    current.value = { path, content: '', media: { kind, url: workspaceMediaUrl(props.sessionId, path) } }
+    draft.value = ''
+    return
+  }
   try {
     current.value = await readWorkspaceFile(props.sessionId, path)
     draft.value = current.value.content
@@ -131,7 +139,7 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
         @node-click="open"
       >
         <template #default="{ data }">
-          <span :class="{ active: data.path === current?.path }">{{ data.children ? '📁' : '📄' }} {{ data.label }}</span>
+          <span :class="{ active: data.path === current?.path }">{{ data.children ? '📁' : { image: '🖼️', video: '🎬', audio: '🎵' }[mediaKind(data.path)] || '📄' }} {{ data.label }}</span>
         </template>
       </el-tree>
     </div>
@@ -140,11 +148,17 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
       <template v-else>
         <div class="bar">
           <strong>{{ current.path }}</strong>
-          <el-button size="small" type="primary" :loading="saving" :disabled="!dirty || current.truncated" title="Ctrl+S" @click="save">保存</el-button>
+          <el-button v-if="!current.media" size="small" type="primary" :loading="saving" :disabled="!dirty || current.truncated" title="Ctrl+S" @click="save">保存</el-button>
+        </div>
+        <div v-if="current.media" class="media">
+          <img v-if="current.media.kind === 'image'" :key="current.path" :src="current.media.url" :alt="current.path" />
+          <video v-else-if="current.media.kind === 'video'" :key="current.path" :src="current.media.url" controls preload="metadata" />
+          <audio v-else :key="current.path" :src="current.media.url" controls preload="metadata" />
         </div>
         <div v-if="current.truncated" class="tip">文件较大，只显示了前面一部分，只读</div>
         <!-- 打开即可编辑；Tab 缩进、Ctrl+Z / Ctrl+Y 撤销重做由组件自带；被截断的大文件只读 -->
         <prism-editor
+          v-if="!current.media"
           :key="current.path"
           v-model="draft"
           class="editor"
@@ -200,6 +214,33 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
 .tip {
   margin: 0 0 8px;
 }
+.media {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  background: #f6f8fa;
+}
+.media img,
+.media video {
+  max-width: 100%;
+  max-height: 100%;
+}
+.media audio {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 8px;
+}
+.bar strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .editor {
   flex: 1;
   min-height: 0;
@@ -220,6 +261,9 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
   outline: none;
 }
 @container (max-width: 520px) {
+  .file {
+    padding: 8px;
+  }
   .browser {
     flex-direction: column;
   }
