@@ -985,3 +985,107 @@ def test_answer_selected_is_empty_when_selection_is_off_or_nothing_is_picked(tmp
     none = Agent(SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["x"])]), [], scripted(), skills=skills).respond("a")
 
     assert off.selected == [] and none.selected == []
+
+
+def test_respond_counts_requests_turns_and_tools(tmp_path):
+    secret = tmp_path / "s.txt"
+    secret.write_text("neigh")
+    provider = FakeProvider(
+        [
+            Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(secret)})]),
+            Reply(texts=["done"]),
+        ]
+    )
+    agent = Agent(provider, [read_file], scripted(), select_skills=False)
+
+    agent.respond("go")
+
+    assert (agent.counter.requests, agent.counter.turns, agent.counter.tools) == (2, 1, 1)
+
+
+def test_counter_records_request_and_tool_stats(tmp_path):
+    secret = tmp_path / "s.txt"
+    secret.write_text("neigh")
+    provider = FakeProvider(
+        [
+            Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(secret)}), ToolCall("c2", "nope", {})]),
+            Reply(texts=["done"], usage=Usage(input_tokens=10, output_tokens=3)),
+        ]
+    )
+    agent = Agent(provider, [read_file], scripted(), select_skills=False)
+
+    agent.respond("go")
+
+    requests = agent.counter.request_stats
+    assert [(r.input_tokens, r.output_tokens) for r in requests] == [(0, 0), (10, 3)]  # 没有 usage 记 0
+    assert all(r.seconds >= 0 for r in requests)
+    tools = agent.counter.tool_stats
+    assert [(t.name, t.files_read, t.files_written) for t in tools] == [("read_file", 1, 0), ("nope", 0, 0)]  # 失败的不算文件
+
+
+def test_counter_records_turn_stats(tmp_path):
+    secret = tmp_path / "s.txt"
+    secret.write_text("neigh")
+    provider = FakeProvider(
+        [
+            Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(secret)})]),
+            Reply(texts=["one"]),
+            Reply(texts=["two"]),
+        ]
+    )
+    agent = Agent(provider, [read_file], scripted(), select_skills=False)
+
+    agent.respond("a")
+    agent.respond("b")
+
+    assert [(t.requests, t.tools) for t in agent.counter.turn_stats] == [(2, 1), (1, 0)]
+    assert all(t.seconds >= 0 for t in agent.counter.turn_stats)
+
+
+def test_request_stat_keeps_input_and_output_messages_and_tool_stat_keeps_paths(tmp_path):
+    (tmp_path / "s.txt").write_text("neigh")
+    provider = FakeProvider(
+        [
+            Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(tmp_path / "s.txt")})]),
+            Reply(texts=["done"]),
+        ]
+    )
+    agent = Agent(provider, [read_file], scripted(), select_skills=False)
+
+    agent.respond("go")
+
+    first, second = agent.counter.request_stats
+    assert first.input_messages == [{"role": "user", "content": "go"}]  # 发出去时的样子，不含这次的回复
+    assert first.output_messages == [{"role": "assistant", "content": []}]  # 这次新增的消息
+    assert len(second.input_messages) == 3  # 用户的话、上一次的回复、工具结果
+    assert agent.counter.tool_stats[0].paths == [str(tmp_path / "s.txt")]
+
+
+def test_skill_selection_request_is_recorded_with_tokens_input_and_output(tmp_path):
+    provider = SelectingProvider(
+        [Reply(texts=['{"skills": ["alpha"]}'], usage=Usage(input_tokens=7, output_tokens=2)), Reply(texts=["done"])]
+    )
+    agent = Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+
+    agent.respond("请做 alpha")
+
+    selection = agent.counter.request_stats[0]  # 第一条是选择请求
+    assert (selection.input_tokens, selection.output_tokens) == (7, 2)
+    assert selection.input_messages[1] == {"role": "user", "content": "请做 alpha"}  # 目录 + 用户输入
+    assert selection.output_messages == [{"role": "assistant", "content": ['{"skills": ["alpha"]}']}]
+    assert len(agent.counter.request_stats) == 2  # 选择请求 + 正式请求
+
+
+def test_failed_skill_selection_request_is_not_recorded(tmp_path):
+    class Broken(SelectingProvider):
+        def chat(self, conversation, tools, system="", **kw):
+            if not tools and len(self.chats) == 0:
+                self.chats.append(list(conversation))
+                raise RuntimeError("boom")
+            return super().chat(conversation, tools, system, **kw)
+
+    agent = Agent(Broken([Reply(texts=["done"])]), [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+
+    agent.respond("hi")
+
+    assert len(agent.counter.request_stats) == 1  # 只有正式请求

@@ -136,6 +136,8 @@ class DeployGame(EurekaPlugin):
         """把进程输出逐行交给 ctx.log，返回末尾一段（用于错误信息）。"""
         text = log_file.read_text(encoding="utf-8", errors="replace") if log_file.is_file() else ""
         for line in text.splitlines()[-50:]:
+            if "://" in line:  # 访问地址只在 report 阶段给出，这里不转发带地址的行
+                continue
             ctx.log(line)
         return text.strip()[-LOG_TAIL_CHARS:] or "（没有输出）"
 

@@ -15,10 +15,12 @@ chatbot 和 agent 在代码上的唯一区别，是下面那个 need_user_input 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -119,6 +121,63 @@ class ConsoleApprover:
 
 
 DEFAULT_SESSION = "default"  # 没有 persona 时的内置会话：工具由 --step 决定，提示词就是原来那份
+
+
+@dataclass
+class RequestStat:
+    """一次请求 Responses API 的记录：响应时间（秒）和用到的 token 数（拿不到 usage 时是 0）。"""
+
+    seconds: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    input_messages: list = field(default_factory=list)  # 发给模型的对话（provider 的原始格式，JSON）
+    output_messages: list = field(default_factory=list)  # 这次请求新增的消息（模型的回复和工具调用）
+
+
+@dataclass
+class ToolStat:
+    """一次工具使用的记录：工具类型（名字）、耗时（秒）、读和写的文件数（失败的调用不算文件）。"""
+
+    name: str
+    seconds: float
+    files_read: int = 0
+    files_written: int = 0
+    paths: list[str] = field(default_factory=list)  # 读 / 写的文件路径（只记路径，不记内容）
+
+
+@dataclass
+class TurnStat:
+    """一个 turn（用户一句话 → 模型最终回复）的记录：总耗时（秒）、这个 turn 里的请求次数和工具使用次数。"""
+
+    seconds: float
+    requests: int
+    tools: int
+
+
+# 工具读 / 写文件的数量：read_file 读 1 个，edit_file 写 1 个；run_bash 等无法从参数判断，记 0
+FILES_READ = {"read_file": 1}
+FILES_WRITTEN = {"edit_file": 1}
+
+
+@dataclass
+class Counter:
+    """计数器：Agent 自己累加，调用方读取。请求和工具各存一条结构化记录，turn 只有次数。"""
+
+    request_stats: list[RequestStat] = field(default_factory=list)
+    tool_stats: list[ToolStat] = field(default_factory=list)
+    turn_stats: list[TurnStat] = field(default_factory=list)
+
+    @property
+    def turns(self) -> int:
+        return len(self.turn_stats)
+
+    @property
+    def requests(self) -> int:
+        return len(self.request_stats)
+
+    @property
+    def tools(self) -> int:
+        return len(self.tool_stats)
 
 
 @dataclass
@@ -231,6 +290,7 @@ class Agent:
         # 默认读终端（多行、方向键、历史），每个 Agent 一个，历史不跨会话；测试里注入脚本化输入
         self.get_user_input = get_user_input or make_default_reader(self.commands)
         self.max_tool_rounds = max_tool_rounds
+        self.counter = Counter()
         # 先选后载：正式请求之前先问一次模型要加载哪些 skill（见 skill_selector.py），默认开启
         self.select_skills = select_skills
         # 只在终端显示、不发给模型的命令：参数是命令后面的文字
@@ -357,7 +417,22 @@ class Agent:
         )
 
     def _execute(self, call: ToolCall) -> ToolResult:
-        """执行一次工具调用。失败也返回结果，交给模型自己纠错。"""
+        """执行一次工具调用（并记一条 ToolStat）。失败也返回结果，交给模型自己纠错。"""
+        start = time.monotonic()
+        result = self._run_tool(call)
+        ok = not result.is_error
+        self.counter.tool_stats.append(
+            ToolStat(
+                call.name,
+                time.monotonic() - start,
+                FILES_READ.get(call.name, 0) if ok else 0,
+                FILES_WRITTEN.get(call.name, 0) if ok else 0,
+                [str(call.input["path"])] if ok and call.name in FILES_READ | FILES_WRITTEN else [],
+            )
+        )
+        return result
+
+    def _run_tool(self, call: ToolCall) -> ToolResult:
         print(f"\033[92mtool\033[0m: {call.name}({json.dumps(call.input, ensure_ascii=False)})")
         tool = self.tools.get(call.name)
         try:
@@ -414,7 +489,22 @@ class Agent:
             return None, []
         usable = [s for s in self.skills.values() if s.model_invocable]
         try:
-            refs = pick_skills(self.provider, user_input, usable)
+            start = time.monotonic()
+
+            def record(sent: list[dict], reply: Reply) -> None:
+                """选 skill 也是一次请求：和正式请求一样记耗时、token、输入和输出。"""
+                usage = reply.usage
+                self.counter.request_stats.append(
+                    RequestStat(
+                        time.monotonic() - start,
+                        usage.input_tokens if usage else 0,
+                        usage.output_tokens if usage else 0,
+                        sent,
+                        [{"role": "assistant", "content": reply.texts}],
+                    )
+                )
+
+            refs = pick_skills(self.provider, user_input, usable, on_request=record)
             already = "\n".join(str(m.get("content")) for m in history if m.get("role") == "user")
             fresh = [r for r in refs if f'<skill name="{r.name}">' not in already]
             message, warnings = skills_message([r.path for r in fresh])
@@ -510,7 +600,19 @@ class Agent:
         """
         optional = {"on_text": on_text, "model": model, "effort": effort}
         extra = {k: v for k, v in optional.items() if v}
+        sent = copy.deepcopy(conversation)  # 发出去之前的样子；chat 会往 conversation 里追加回复
+        start = time.monotonic()
         reply = self.provider.chat(conversation, list(self.tools.values()), self.system, **extra)
+        usage = reply.usage
+        self.counter.request_stats.append(
+            RequestStat(
+                time.monotonic() - start,
+                usage.input_tokens if usage else 0,
+                usage.output_tokens if usage else 0,
+                sent,
+                copy.deepcopy(conversation[len(sent) :]),
+            )
+        )
         if reply.usage:
             self._log_usage(reply.usage)
             self.current.last_input_tokens = reply.usage.input_tokens
@@ -522,6 +624,12 @@ class Agent:
                         file=sys.stderr,
                     )
         return reply
+
+    def _end_turn(self, start: float, requests_before: int, tools_before: int) -> None:
+        """turn 结束（respond 返回前）：记一条 TurnStat。"""
+        self.counter.turn_stats.append(
+            TurnStat(time.monotonic() - start, self.counter.requests - requests_before, self.counter.tools - tools_before)
+        )
 
     @staticmethod
     def _with_separator(on_text: Callable[[str], None], needs_separator: bool) -> Callable[[str], None]:
@@ -566,6 +674,8 @@ class Agent:
 
         extra_context：先选后载选中 skill 之后，用它们的名字回调；返回的文字紧跟在 skill 全文后面作为 user 消息。
         """
+        turn_start = time.monotonic()
+        requests_before, tools_before = self.counter.requests, self.counter.tools  # 选 skill 的请求也算在这个 turn 里
         conversation = [*self.current.conversation]
         chosen: list[str] = []
         if not skills_message:  # 调用方给了就不再选
@@ -580,10 +690,12 @@ class Agent:
             texts.extend(reply.texts)
             if not reply.tool_calls:
                 self.current.conversation[:] = conversation
+                self._end_turn(turn_start, requests_before, tools_before)
                 return Answer(texts, selected=chosen)
             conversation.extend(self.provider.tool_results([self._execute(call) for call in reply.tool_calls]))
         # 到上限：结果已回灌，每个 tool_call id 都有回复，用户下一句接在后面即可（和 run() 一致）
         self.current.conversation[:] = conversation
+        self._end_turn(turn_start, requests_before, tools_before)
         return Answer(texts, paused=True, selected=chosen)
 
 

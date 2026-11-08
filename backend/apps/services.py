@@ -6,8 +6,9 @@ import tempfile
 from pathlib import Path
 
 from django.conf import settings
+from django.db.models import Avg
 
-from skills import load_skill_file  # core：能不能当 skill，以它的判断为准
+from skills import load_skill_file, parse_frontmatter  # core：能不能当 skill，以它的判断为准
 
 from . import harness
 from .models import ChatSession, Eureka, FileChange, Message, SkillSelection
@@ -178,6 +179,27 @@ def read_workspace_file(session: ChatSession, rel_path: str) -> dict | None:
         "content": data[:MAX_VIEW_BYTES].decode("utf-8", errors="replace"),
         "truncated": len(data) > MAX_VIEW_BYTES,
     }
+
+
+def write_workspace_file(session: ChatSession, rel_path: str, content: str) -> bool:
+    """覆盖工作区里一个已有文件的文本内容；不存在或跑出工作区返回 False。内容超过 MAX_VIEW_BYTES 抛 ValueError。
+
+    同时更新变更快照：这是用户自己改的，不该被当成模型这一轮造成的「文件变更」。
+    """
+    root = Path(harness.workspace_dir(session)).resolve()
+    path = (root / rel_path).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return False
+    data = content.encode("utf-8")
+    if len(data) > MAX_VIEW_BYTES:
+        raise ValueError("file too large")
+    path.write_bytes(data)
+    stat = path.stat()
+    snapshot = dict(session.file_snapshot or {})
+    snapshot[path.relative_to(root).as_posix()] = [stat.st_mtime_ns, stat.st_size]
+    session.file_snapshot = snapshot
+    session.save(update_fields=["file_snapshot"])
+    return True
 
 
 def send_user_message(
@@ -351,10 +373,24 @@ def _default_path(name: str) -> Path | None:
     return None
 
 
+def _skill_name(path: Path | None) -> str | None:
+    """文件 frontmatter 里的 name；读不了或没有就是 None。"""
+    try:
+        fm = parse_frontmatter(path.read_bytes().decode("utf-8", errors="replace"))
+    except (OSError, AttributeError):
+        return None
+    return (fm or {}).get("name", "").strip() or None
+
+
 def list_plugins(session: ChatSession) -> list[dict]:
     """列出这个会话能看到的插件：先是默认插件（所有会话都有），再是会话自己的；各自按名称排序。"""
     defaults = [_plugin(n, default=True) for n in _default_names()]
     own = [_plugin(n) for n in _md_names(_root(session))]
+    # skill_name：frontmatter 的 name，skill_selector 选中的是它；前端靠它认出被选中的那一行
+    for item in defaults:
+        item["skill_name"] = _skill_name(_default_path(item["name"]))
+    for item in own:
+        item["skill_name"] = _skill_name(_root(session) / item["name"])
     return defaults + own
 
 
@@ -405,6 +441,21 @@ def create_plugin(session: ChatSession, uploaded) -> dict:
     return _plugin(name)
 
 
+def update_plugin(session: ChatSession, name: str, content: str) -> dict:
+    """编辑：用新内容整个覆盖已有的会话插件。默认插件只读（403），不存在 404，内容不合格 400（文件不变）。"""
+    if _default_path(name) is not None:
+        raise PluginError(f"{name} 是默认插件，不能修改", status=403)
+    path = _plugin_path(session, name)
+    if not path.is_file():
+        raise PluginError(f"找不到插件 {name}", status=404)
+    raw = content.encode("utf-8")
+    if len(raw) > settings.HARNESS_MAX_UPLOAD_BYTES:
+        raise PluginError("内容太大", status=413)
+    _check_frontmatter(raw)
+    path.write_bytes(raw)
+    return get_plugin(session, name)
+
+
 def delete_plugin(session: ChatSession, name: str) -> None:
     if _default_path(name) is not None:
         raise PluginError(f"{name} 是默认插件，不能删除", status=403)
@@ -419,3 +470,60 @@ def all_plugin_paths(session: ChatSession) -> list[str]:
     paths = [str(_default_root() / n) for n in _default_names()]
     paths += [str(_root(session) / n) for n in _md_names(_root(session))]
     return paths
+
+
+def session_stats(session: ChatSession) -> dict:
+    """会话统计：请求和工具记录的平均值（没有记录的项是 None）。"""
+    r = session.request_stats.aggregate(
+        seconds=Avg("seconds"), input_tokens=Avg("input_tokens"), output_tokens=Avg("output_tokens")
+    )
+    t = session.tool_stats.aggregate(
+        seconds=Avg("seconds"), files_read=Avg("files_read"), files_written=Avg("files_written")
+    )
+    n = session.turn_stats.aggregate(seconds=Avg("seconds"), requests=Avg("requests"), tools=Avg("tools"))
+    return {
+        "turn": {"avg_seconds": n["seconds"], "avg_requests": n["requests"], "avg_tools": n["tools"]},
+        "request": {
+            "avg_seconds": r["seconds"],
+            "avg_input_tokens": r["input_tokens"],
+            "avg_output_tokens": r["output_tokens"],
+        },
+        "tool": {
+            "avg_seconds": t["seconds"],
+            "avg_files_read": t["files_read"],
+            "avg_files_written": t["files_written"],
+        },
+    }
+
+
+STATS_DETAIL_LIMIT = 200  # 明细每类最多返回最近多少条
+
+
+def session_stats_detail(session: ChatSession) -> dict:
+    """会话统计的明细：每个轮一行（最近的在前），行里带着这一轮的请求和工具记录，保存了什么字段就返回什么。"""
+    turns = session.turn_stats.order_by("-id").prefetch_related("request_stats", "tool_stats")[:STATS_DETAIL_LIMIT]
+    return {
+        "turns": [
+            {
+                "id": t.id,
+                "seconds": t.seconds,
+                "requests": t.requests,
+                "tools": t.tools,
+                "request_list": [
+                    {"id": r.id, "seconds": r.seconds, "input_tokens": r.input_tokens, "output_tokens": r.output_tokens}
+                    for r in t.request_stats.all()
+                ],
+                "tool_list": [
+                    {"id": x.id, "name": x.name, "seconds": x.seconds, "files_read": x.files_read, "files_written": x.files_written, "paths": x.paths}
+                    for x in t.tool_stats.all()
+                ],
+            }
+            for t in turns
+        ]
+    }
+
+
+def request_stat_content(session: ChatSession, request_id: int) -> dict | None:
+    """一次请求发给模型的内容和模型的输出（JSON）。不属于这个会话或不存在就是 None。"""
+    stat = session.request_stats.filter(pk=request_id).first()
+    return {"input": stat.input_messages, "output": stat.output_messages} if stat else None

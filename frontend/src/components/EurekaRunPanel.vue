@@ -3,8 +3,10 @@
 // 刷新页面后，后端消息里带着 run 的 id 和状态，没跑完的会继续拉取，直到结束。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getEurekaRun } from '../api'
-import { STATUS_LABEL, nextDelay, progressSummary, shouldPoll, splitLinks, stageIcon } from '../utils/eurekaRun'
+import { STATUS_LABEL, isFinished, nextDelay, progressSummary, shouldPoll, splitLinks, stageIcon } from '../utils/eurekaRun'
 
+// update：每次拉到进度都通知上层（预览页靠它收集链接）；finished：亲眼看到它从未结束变成 done 时通知一次（预览页靠它跳转）
+const emit = defineEmits(['update', 'finished'])
 const props = defineProps({
   sessionId: { type: String, required: true },
   runId: { type: Number, required: true },
@@ -21,11 +23,15 @@ const status = computed(() => run.value?.status ?? props.initialStatus)
 let timer = null
 let attempt = 0
 let stopped = false
+let sawUnfinished = !isFinished(props.initialStatus) // 刷新页面时已经结束的运行，不算「刚完成」，不触发跳转
 
 async function refresh() {
   try {
     run.value = await getEurekaRun(props.sessionId, props.runId)
     failedToLoad.value = false
+    emit('update', run.value)
+    if (run.value.status === 'done' && sawUnfinished) emit('finished', run.value)
+    sawUnfinished = sawUnfinished && !isFinished(run.value.status)
   } catch {
     failedToLoad.value = true // 网络抖一下不要紧，下一轮再试；结束前不会放弃
   }

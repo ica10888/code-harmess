@@ -70,3 +70,29 @@ class WorkspaceBrowseTests(TestCase):
     def test_cannot_escape_workspace(self):
         for p in ["../../../secret.txt", "..\\..\\secret.txt", "nope.txt", ""]:
             self.assertEqual(self.client.get(self.url("file/"), {"path": p}).status_code, 404, p)
+
+
+class WorkspaceEditTests(WorkspaceBrowseTests):
+    """编辑工作区文件：PUT 覆盖已有文件的内容。"""
+
+    def put(self, path, content):
+        return self.client.put(self.url("file/"), {"path": path, "content": content}, format="json")
+
+    def test_edit_existing(self):
+        self.assertEqual(self.put("sub/b.txt", "新内容").status_code, 200)
+        self.assertEqual(self.client.get(self.url("file/"), {"path": "sub/b.txt"}).json()["content"], "新内容")
+
+    def test_edit_does_not_count_as_ai_change(self):
+        """用户自己改的文件，不该在下一条回复下面提示「有文件变更」。"""
+        self.session.refresh_from_db()
+        services.save_assistant_message(self.session, "好的")  # 先把快照对齐
+        self.put("a.txt", "改过了")
+        self.session.refresh_from_db()
+        self.assertFalse(hasattr(services.save_assistant_message(self.session, "好的"), "file_change"))
+
+    def test_cannot_edit_outside_or_missing(self):
+        for p in ["../../../secret.txt", "..\\..\\secret.txt", "nope.txt", ""]:
+            self.assertEqual(self.put(p, "x").status_code, 404, p)
+
+    def test_too_large(self):
+        self.assertEqual(self.put("a.txt", "x" * (services.MAX_VIEW_BYTES + 1)).status_code, 413)

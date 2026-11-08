@@ -46,3 +46,11 @@ export function splitLinks(text) {
   if (last < text.length) parts.push({ text: text.slice(last) })
   return parts
 }
+
+/** 一次运行所有阶段日志里的链接，按出现顺序、去重；预览页用它。 */
+export function extractLinks(run) {
+  const links = new Set()
+  for (const stage of run?.stages ?? [])
+    for (const line of stage.logs ?? []) for (const part of splitLinks(line)) if (part.href) links.add(part.href)
+  return [...links]
+}

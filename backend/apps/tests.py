@@ -158,3 +158,44 @@ class PushMessageCommandTests(TestCase):
         (frame,) = iter_events(session, 0, poll_seconds=0, max_loops=1)
         assert "后端主动说话" in json.loads(frame.split("data: ", 1)[1])["content"]
         assert Message.objects.get().role == "assistant"
+
+
+class SessionStatsDetailTests(TestCase):
+    def test_each_turn_lists_its_own_requests_and_tools_newest_turn_first(self):
+        from .models import RequestStat, ToolStat, TurnStat
+
+        client = self.client
+        session_id = client.post("/api/sessions/", {}, content_type="application/json").json()["id"]
+        session = ChatSession.objects.get(pk=session_id)
+        first = TurnStat.objects.create(session=session, seconds=1.5, requests=2, tools=1)
+        second = TurnStat.objects.create(session=session, seconds=0.7, requests=1, tools=0)
+        RequestStat.objects.create(session=session, turn=first, seconds=0.5, input_tokens=10, output_tokens=3)
+        RequestStat.objects.create(session=session, turn=first, seconds=0.4, input_tokens=12, output_tokens=4)
+        RequestStat.objects.create(session=session, turn=second, seconds=0.6, input_tokens=20, output_tokens=5)
+        ToolStat.objects.create(session=session, turn=first, name="read_file", seconds=0.1, files_read=1)
+
+        turns = client.get(f"/api/sessions/{session_id}/stats/detail/").json()["turns"]
+
+        assert [t["id"] for t in turns] == [second.id, first.id]
+        assert [r["input_tokens"] for r in turns[1]["request_list"]] == [10, 12]
+        assert [r["input_tokens"] for r in turns[0]["request_list"]] == [20]
+        assert [x["name"] for x in turns[1]["tool_list"]] == ["read_file"] and turns[0]["tool_list"] == []
+
+
+class RequestStatContentTests(TestCase):
+    def test_content_is_returned_for_own_session_only(self):
+        from .models import RequestStat
+
+        client = self.client
+        mine = ChatSession.objects.get(pk=client.post("/api/sessions/", {}, content_type="application/json").json()["id"])
+        other = ChatSession.objects.create(owner_key="someone-else")
+        stat = RequestStat.objects.create(
+            session=mine, seconds=0.1, input_messages=[{"role": "user", "content": "hi"}], output_messages=[{"role": "assistant"}]
+        )
+        theirs = RequestStat.objects.create(session=other, seconds=0.1)
+
+        ok = client.get(f"/api/sessions/{mine.id}/stats/requests/{stat.id}/")
+        stolen = client.get(f"/api/sessions/{mine.id}/stats/requests/{theirs.id}/")
+
+        assert ok.json() == {"input": [{"role": "user", "content": "hi"}], "output": [{"role": "assistant"}]}
+        assert stolen.status_code == 404

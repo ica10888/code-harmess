@@ -4,9 +4,10 @@ import json
 import time
 
 from django.conf import settings
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.http import Http404, StreamingHttpResponse
 from rest_framework import status
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -143,6 +144,14 @@ class OptionsView(APIView):
         )
 
 
+def text_upload(data):
+    """JSON 里的 name + content → 一个和上传文件等价的对象；缺字段就是 None。"""
+    name, content = data.get("name"), data.get("content")
+    if not isinstance(name, str) or not isinstance(content, str):
+        return None
+    return SimpleUploadedFile(name, content.encode("utf-8"))
+
+
 def plugin_error(e: services.PluginError) -> Response:
     return Response({"detail": str(e)}, status=e.status)
 
@@ -165,11 +174,25 @@ class WorkspaceFileContentView(APIView):
             raise Http404
         return Response(result)
 
+    def put(self, request, session_id):
+        """编辑：body {path, content}，覆盖已有文件；不存在 404，太大 413。"""
+        session = get_own_session(request, session_id)
+        content = request.data.get("content")
+        if not isinstance(content, str):
+            return Response({"detail": "content 必须是字符串"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            ok = services.write_workspace_file(session, str(request.data.get("path", "")), content)
+        except ValueError:
+            return Response({"detail": "文件太大"}, status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        if not ok:
+            raise Http404
+        return Response({"path": request.data["path"]})
+
 
 class PluginListView(APIView):
     """GET 列出这个会话的插件；POST 上传一个 .md 文件新增插件（表单字段 file）。"""
 
-    parser_classes = [MultiPartParser]
+    parser_classes = [MultiPartParser, JSONParser]
 
     def get(self, request, session_id):
         session = get_own_session(request, session_id)
@@ -177,9 +200,9 @@ class PluginListView(APIView):
 
     def post(self, request, session_id):
         session = get_own_session(request, session_id)
-        uploaded = request.FILES.get("file")
+        uploaded = request.FILES.get("file") or text_upload(request.data)  # 也可以在线新建：JSON {name, content}
         if uploaded is None:
-            return Response({"detail": "请选择一个 .md 文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "请选择一个 .md 文件（表单字段 file），或提交 name 和 content"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             plugin = services.create_plugin(session, uploaded)
         except services.PluginError as e:
@@ -197,6 +220,16 @@ class PluginDetailView(APIView):
         except services.PluginError as e:
             return plugin_error(e)
 
+    def put(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        content = request.data.get("content")
+        if not isinstance(content, str):
+            return Response({"detail": "缺少 content"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response(PluginDetailSerializer(services.update_plugin(session, name, content)).data)
+        except services.PluginError as e:
+            return plugin_error(e)
+
     def delete(self, request, session_id, name):
         session = get_own_session(request, session_id)
         try:
@@ -209,7 +242,7 @@ class PluginDetailView(APIView):
 class WorkflowListView(APIView):
     """GET 列出这个会话的工作流；POST 上传一个 .md 文件新增工作流（表单字段 file）。返回格式和插件一样。"""
 
-    parser_classes = [MultiPartParser]
+    parser_classes = [MultiPartParser, JSONParser]
 
     def get(self, request, session_id):
         session = get_own_session(request, session_id)
@@ -217,9 +250,9 @@ class WorkflowListView(APIView):
 
     def post(self, request, session_id):
         session = get_own_session(request, session_id)
-        uploaded = request.FILES.get("file")
+        uploaded = request.FILES.get("file") or text_upload(request.data)  # 也可以在线新建：JSON {name, content}
         if uploaded is None:
-            return Response({"detail": "请选择一个 .md 文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": "请选择一个 .md 文件（表单字段 file），或提交 name 和 content"}, status=status.HTTP_400_BAD_REQUEST)
         try:
             workflow = workflows.create_workflow(session, uploaded)
         except services.PluginError as e:
@@ -234,6 +267,16 @@ class WorkflowDetailView(APIView):
         session = get_own_session(request, session_id)
         try:
             return Response(PluginDetailSerializer(workflows.get_workflow(session, name)).data)
+        except services.PluginError as e:
+            return plugin_error(e)
+
+    def put(self, request, session_id, name):
+        session = get_own_session(request, session_id)
+        content = request.data.get("content")
+        if not isinstance(content, str):
+            return Response({"detail": "缺少 content"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response(PluginDetailSerializer(workflows.update_workflow(session, name, content)).data)
         except services.PluginError as e:
             return plugin_error(e)
 
@@ -284,3 +327,27 @@ class EurekaRunView(APIView):
         if run is None:
             raise Http404
         return Response(EurekaRunSerializer(run).data)
+
+
+class SessionStatsView(APIView):
+    """会话统计：请求响应时间、token、工具耗时、读写文件数的平均值。"""
+
+    def get(self, request, session_id):
+        return Response(services.session_stats(get_own_session(request, session_id)))
+
+
+class SessionStatsDetailView(APIView):
+    """会话统计的明细列表：每个轮、每次请求、每次工具使用保存的字段。"""
+
+    def get(self, request, session_id):
+        return Response(services.session_stats_detail(get_own_session(request, session_id)))
+
+
+class RequestStatContentView(APIView):
+    """展开一次请求：发给模型的输入和模型的输出，保持 JSON 格式。"""
+
+    def get(self, request, session_id, request_id):
+        content = services.request_stat_content(get_own_session(request, session_id), request_id)
+        if content is None:
+            raise Http404
+        return Response(content)

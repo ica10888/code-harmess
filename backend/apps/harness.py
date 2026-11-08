@@ -9,9 +9,13 @@ import logging
 import os
 import queue
 import threading
+from dataclasses import asdict
 from datetime import datetime
+from itertools import islice
 
 from django.conf import settings
+
+from .models import RequestStat, ToolStat, TurnStat
 
 # core 的模块用的是顶层 import（import tools、from providers import ...），所以要把它的 src 放进 sys.path。
 # 这一步在 settings.py 里做；这里直接 import 即可。
@@ -129,7 +133,19 @@ def _finish(session, agent: Agent, answer) -> str:
     由 services.save_assistant_message 取走并存成 SkillSelection；返回类型不变，已有的调用方和测试都不用动。
     """
     session.conversation = json.loads(json.dumps(agent.current.conversation))  # 确保能存进 JSONField
-    session.save(update_fields=["conversation"])
+    counter = agent.counter  # 这一轮 core 数出来的次数，累加进会话
+    session.request_count += counter.requests
+    session.turn_count += counter.turns
+    session.tool_count += counter.tools
+    session.save(update_fields=["conversation", "request_count", "turn_count", "tool_count"])
+    # 每个 turn 带着自己的请求数和工具数，请求和工具记录是按发生顺序存的，依次切下来就知道各属于哪一轮
+    requests, tools = iter(counter.request_stats), iter(counter.tool_stats)
+    for t in counter.turn_stats:
+        turn = TurnStat.objects.create(session=session, **asdict(t))
+        RequestStat.objects.bulk_create(
+            RequestStat(session=session, turn=turn, **asdict(r)) for r in islice(requests, t.requests)
+        )
+        ToolStat.objects.bulk_create(ToolStat(session=session, turn=turn, **asdict(x)) for x in islice(tools, t.tools))
     session.selected_skills = list(answer.selected)
     texts = [*answer.texts, PAUSED_NOTICE.format(rounds=settings.HARNESS_MAX_TOOL_ROUNDS)] if answer.paused else answer.texts
     return "\n\n".join(texts) or EMPTY_REPLY

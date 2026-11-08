@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
-from providers import Provider
+from providers import Provider, Reply
 from skills import Skill
 
 SELECTOR_SYSTEM = (
@@ -79,12 +80,23 @@ def _parse_names(text: str) -> list[str]:
     return []
 
 
-def select_skills(provider: Provider, user_input: str, skills: list[Skill]) -> list[SkillRef]:
-    """请求一次模型，返回要加载的 skill（名称、路径）。没有可用 skill 就不发请求。"""
+def select_skills(
+    provider: Provider,
+    user_input: str,
+    skills: list[Skill],
+    on_request: Callable[[list[dict], Reply], None] | None = None,
+) -> list[SkillRef]:
+    """请求一次模型，返回要加载的 skill（名称、路径）。没有可用 skill 就不发请求。
+
+    on_request：请求成功后用（发出去的输入、模型的回复）回调一次，调用方用它记录这次请求的内容和 token。
+    """
     if not skills:
         return []
     conversation = build_selection_input(user_input, skills)
+    sent = [dict(m) for m in conversation]  # chat 可能往 conversation 里追加回复，先留一份发出去时的样子
     reply = provider.chat(conversation, [], system=SELECTOR_SYSTEM, effort=SELECTOR_EFFORT)
+    if on_request:
+        on_request(sent, reply)
     by_name = {s.name: s for s in skills}
     refs: dict[str, SkillRef] = {}
     for name in _parse_names("\n".join(reply.texts)):

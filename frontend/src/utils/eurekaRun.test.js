@@ -1,7 +1,7 @@
 // eureka 工作流进度的前端逻辑：node --test，不需要浏览器。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFinished, progressSummary, stageIcon, shouldPoll, nextDelay, STATUS_LABEL } from './eurekaRun.js'
+import { isFinished, progressSummary, stageIcon, shouldPoll, nextDelay, STATUS_LABEL, extractLinks } from './eurekaRun.js'
 
 const stage = (key, status, extra = {}) => ({ key, title: key.toUpperCase(), status, error: '', logs: [], ...extra })
 const run = (status, stages) => ({ id: 1, plugin: 'code-review', status, error: '', stages })
@@ -67,4 +67,15 @@ test('拉取间隔：刚开始快，之后逐渐放慢，有上限，不会无�
 test('拉取间隔对非法入参也给出合理值', () => {
   assert.equal(nextDelay(-5), nextDelay(0))
   assert.equal(nextDelay(NaN), nextDelay(0))
+})
+
+test('extractLinks：按出现顺序收集所有阶段日志里的链接，去重', () => {
+  const run = {
+    stages: [
+      { logs: ['部署完成：http://127.0.0.1:5200，请访问', '无链接'] },
+      { logs: ['again http://127.0.0.1:5200 和 https://a.com/x'] },
+    ],
+  }
+  assert.deepEqual(extractLinks(run), ['http://127.0.0.1:5200', 'https://a.com/x'])
+  assert.deepEqual(extractLinks(null), [])
 })

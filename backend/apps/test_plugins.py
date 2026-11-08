@@ -57,7 +57,7 @@ class PluginApiTests(TestCase):
         res = self.upload(md("notes.md"))
 
         assert res.status_code == 201
-        assert res.json() == {"name": "notes.md", "default": False}
+        assert res.json() == {"name": "notes.md", "default": False, "skill_name": None}
         assert (self.skills_dir / "notes.md").read_bytes() == DEFAULT_BODY.encode("utf-8")
 
     def test_content_must_have_frontmatter_but_nothing_else_about_it_is_checked(self):
@@ -137,7 +137,7 @@ class PluginApiTests(TestCase):
 
         assert res.status_code == 200
         assert [p["name"] for p in res.json()] == ["alpha.md", "mid.md", "zeta.md"]
-        assert set(res.json()[0]) == {"name", "default"}  # 列表里不带正文
+        assert set(res.json()[0]) == {"name", "default", "skill_name"}  # 列表里不带正文；skill_name 是 frontmatter 的 name
 
     def test_empty_session_has_an_empty_list_and_listing_does_not_create_the_directory(self):
         assert self.client.get(self.base).json() == []
@@ -359,3 +359,19 @@ class DefaultPluginTests(TestCase):
         self.upload("mine.md")
         assert self.client.delete(f"{self.base}mine.md/").status_code == 204
         assert [p["name"] for p in self.client.get(self.base).json()] == ["format.md", "review.md"]
+
+
+class PluginEditTests(PluginApiTests):
+    """在线新建（POST JSON）和编辑（PUT）。"""
+
+    def test_create_from_text_and_update(self):
+        base = f"/api/sessions/{self.sid}/plugins/"
+        body = DEFAULT_BODY
+        assert self.client.post(base, {"name": "n.md", "content": body}, format="json").status_code == 201
+        assert self.client.post(base, {"name": "n.md", "content": body}, format="json").status_code == 409
+
+        new = body + "新增一行\n"
+        assert self.client.put(f"{base}n.md/", {"content": new}, format="json").status_code == 200
+        assert self.client.get(f"{base}n.md/").json()["content"] == new
+        assert self.client.put(f"{base}n.md/", {"content": "没有 frontmatter"}, format="json").status_code == 400
+        assert self.client.put(f"{base}nope.md/", {"content": new}, format="json").status_code == 404

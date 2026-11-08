@@ -60,8 +60,11 @@ def _workflow(name: str, default: bool = False) -> dict:
 
 def list_workflows(session: ChatSession) -> list[dict]:
     """这个会话能看到的工作流：先是默认的，再是会话自己的；各自按名称排序。"""
-    defaults = [_workflow(n, default=True) for n in _default_names()]
-    return defaults + [_workflow(n) for n in _md_names(_root(session))]
+    items = [_workflow(n, default=True) for n in _default_names()] + [_workflow(n) for n in _md_names(_root(session))]
+    for item in items:  # skill_name：frontmatter 的 name，和选中的 skill 同名；前端靠它认出被选中的那一行
+        path = _default_path(item["name"]) if item["default"] else _root(session) / item["name"]
+        item["skill_name"] = _frontmatter_name(path) if path else None
+    return items
 
 
 def get_workflow(session: ChatSession, name: str) -> dict:
@@ -110,6 +113,21 @@ def create_workflow(session: ChatSession, uploaded) -> dict:
     except FileExistsError:
         raise PluginError(f"已经有叫 {name} 的工作流，请先删除再上传", status=409) from None
     return _workflow(name)
+
+
+def update_workflow(session: ChatSession, name: str, content: str) -> dict:
+    """编辑：用新内容整个覆盖已有的会话工作流。默认工作流只读（403），不存在 404，内容不合格 400（文件不变）。"""
+    if _default_path(name) is not None:
+        raise PluginError(f"{name} 是默认工作流，不能修改", status=403)
+    path = _workflow_path(session, name)
+    if not path.is_file():
+        raise PluginError(f"找不到工作流 {name}", status=404)
+    raw = content.encode("utf-8")
+    if len(raw) > settings.HARNESS_MAX_UPLOAD_BYTES:
+        raise PluginError("内容太大", status=413)
+    _check_frontmatter(raw)
+    path.write_bytes(raw)
+    return get_workflow(session, name)
 
 
 def _file_of(session: ChatSession, filename: str) -> Path:

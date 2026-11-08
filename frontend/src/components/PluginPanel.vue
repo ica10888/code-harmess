@@ -11,6 +11,10 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   addPlugin,
   addWorkflow,
+  createPlugin,
+  createWorkflow,
+  updatePlugin,
+  updateWorkflow,
   deletePlugin,
   deleteWorkflow,
   getPlugin,
@@ -31,13 +35,35 @@ import {
 const props = defineProps({
   sessionId: { type: String, default: null },
   kind: { type: String, default: 'plugin' },
+  // 最近一次被选中的名字，和对应消息的 id（id 变了才重新变色）
+  selected: { type: Array, default: () => [] },
+  selectedKey: { type: [Number, String], default: null },
 })
 
 const isWorkflow = props.kind === 'workflow'
 const noun = isWorkflow ? '工作流' : '插件'
 const api = isWorkflow
-  ? { list: listWorkflows, get: getWorkflow, add: addWorkflow, remove: deleteWorkflow }
-  : { list: listPlugins, get: getPlugin, add: addPlugin, remove: deletePlugin }
+  ? { list: listWorkflows, get: getWorkflow, add: addWorkflow, remove: deleteWorkflow, create: createWorkflow, update: updateWorkflow }
+  : { list: listPlugins, get: getPlugin, add: addPlugin, remove: deletePlugin, create: createPlugin, update: updatePlugin }
+
+// 选中的名字彩虹变色，5 秒后恢复：动画本身是 5 秒（见样式），这里只负责到点移除 class。
+// selected 里是 skill 的 frontmatter name，和列表里的文件名不同，所以按 p.skill_name 比
+const FLASH_MS = 5000
+const flashing = ref([])
+let flashTimer = null
+watch(
+  () => props.selectedKey,
+  (key) => {
+    clearTimeout(flashTimer)
+    flashing.value = []
+    if (key === null || key === Infinity || !props.selected.length) return
+    // 先清空再下一帧设置，连续两次选中同一个名字时动画也能重新开始
+    requestAnimationFrame(() => {
+      flashing.value = [...props.selected]
+      flashTimer = setTimeout(() => (flashing.value = []), FLASH_MS)
+    })
+  },
+)
 
 const plugins = ref([])
 const loading = ref(false)
@@ -94,15 +120,55 @@ async function onPick(file) {
   return false
 }
 
-// 点名称：弹出二级对话框，只读显示这个文件的全文（不改内容、不影响勾选）
-const viewing = ref(null) // { name, content } 或 null
+// 点名称：弹出二级对话框显示全文；默认项只读，自己的可以改后保存（覆盖原文件）
+const viewing = ref(null) // { name, default, content } 或 null
 const viewVisible = ref(false)
+const draft = ref('') // 编辑框里的内容
 async function view(plugin) {
   try {
     viewing.value = await api.get(props.sessionId, plugin.name)
+    draft.value = viewing.value.content
     viewVisible.value = true
   } catch (err) {
     ElMessage.error(pluginErrorMessage(err))
+  }
+}
+async function save() {
+  busy.value = true
+  try {
+    viewing.value = await api.update(props.sessionId, viewing.value.name, draft.value)
+    ElMessage.success(`已保存${noun} ${viewing.value.name}`)
+    viewVisible.value = false
+  } catch (err) {
+    ElMessage({ type: 'error', message: pluginErrorMessage(err), duration: 6000, showClose: true })
+  } finally {
+    busy.value = false
+  }
+}
+
+// 新建：填文件名和内容，直接提交（不用先准备文件）
+const creating = ref(false)
+const newName = ref('')
+const newContent = ref('')
+const SKILL_TEMPLATE = ['---', 'name: my-skill', 'description: 这个插件是做什么的、什么时候用', '---', ''].join('\n')
+const WORKFLOW_TEMPLATE = ['---', 'name: my-flow', 'description: 这个工作流的输出格式', 'schema: {"type": "object"}', '---', ''].join('\n')
+function openCreate() {
+  newName.value = ''
+  newContent.value = isWorkflow ? WORKFLOW_TEMPLATE : SKILL_TEMPLATE
+  creating.value = true
+}
+async function create() {
+  const name = newName.value.trim().replace(/(\.md)?$/i, '.md')
+  busy.value = true
+  try {
+    const created = await api.create(props.sessionId, name, newContent.value)
+    plugins.value = [...plugins.value, created].sort((a, b) => a.name.localeCompare(b.name))
+    ElMessage.success(`已新建${noun} ${created.name}`)
+    creating.value = false
+  } catch (err) {
+    ElMessage({ type: 'error', message: pluginErrorMessage(err), duration: 6000, showClose: true })
+  } finally {
+    busy.value = false
   }
 }
 
@@ -138,7 +204,7 @@ async function remove(plugin) {
     <div v-loading="loading" class="list">
       <el-empty v-if="!loading && !plugins.length" :description="`这个会话还没有${noun}`" :image-size="60" />
       <div v-for="p in plugins" :key="p.name" class="item">
-        <span class="name" role="button" title="点击查看内容" @click="view(p)">{{ p.name }}</span>
+        <span class="name" :class="{ rainbow: flashing.includes(p.skill_name) }" role="button" title="点击查看内容" @click="view(p)">{{ p.name }}</span>
         <el-tag v-if="p.default" size="small" type="info" class="tag" :title="`默认${noun}：所有会话都有，不能删除`">默认</el-tag>
         <el-button v-else link type="danger" size="small" class="del" :disabled="busy" @click="remove(p)">删除</el-button>
       </div>
@@ -154,12 +220,26 @@ async function remove(plugin) {
         accept=".md"
         class="add"
       >
-        <el-button :disabled="busy || !sessionId">增加</el-button>
+        <el-button :disabled="busy || !sessionId">上传</el-button>
       </el-upload>
+      <el-button :disabled="busy || !sessionId" @click="openCreate">新建</el-button>
     </div>
 
     <el-dialog v-model="viewVisible" :title="viewing?.name" width="640px" append-to-body>
-      <el-input :model-value="viewing?.content" type="textarea" readonly :rows="18" resize="none" />
+      <el-input v-model="draft" type="textarea" :readonly="viewing?.default" :rows="18" resize="none" />
+      <template v-if="!viewing?.default" #footer>
+        <el-button @click="viewVisible = false">取消</el-button>
+        <el-button type="primary" :disabled="busy || draft === viewing?.content" @click="save">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="creating" :title="`新建${noun}`" width="640px" append-to-body>
+      <el-input v-model="newName" placeholder="文件名，如 notes.md" class="new-name" />
+      <el-input v-model="newContent" type="textarea" :rows="14" resize="none" />
+      <template #footer>
+        <el-button @click="creating = false">取消</el-button>
+        <el-button type="primary" :disabled="busy || !newName.trim()" @click="create">新建</el-button>
+      </template>
     </el-dialog>
   </section>
 </template>
@@ -204,6 +284,7 @@ async function remove(plugin) {
   margin: 0 0 8px;
 }
 .name {
+  color: #303133;
   cursor: pointer;
   font-size: 14px;
   word-break: break-all;
@@ -211,6 +292,31 @@ async function remove(plugin) {
 .name:hover {
   color: #409eff;
   text-decoration: underline;
+}
+.name.rainbow {
+  font-weight: 700;
+  animation:
+    rainbow-fade 5s linear forwards,
+    rainbow-blink 0.5s ease-in-out 6;
+}
+/* 彩虹色轮流变（高饱和），越到后面越浅（向正常的深灰色混合），最后回到正常颜色 */
+@keyframes rainbow-fade {
+  0% { color: color-mix(in srgb, #ff0000 100%, #303133); }
+  10% { color: color-mix(in srgb, #ff8800 100%, #303133); }
+  20% { color: color-mix(in srgb, #ffe600 100%, #303133); }
+  30% { color: color-mix(in srgb, #00e000 95%, #303133); }
+  40% { color: color-mix(in srgb, #00e5ff 85%, #303133); }
+  50% { color: color-mix(in srgb, #0066ff 70%, #303133); }
+  60% { color: color-mix(in srgb, #aa00ff 55%, #303133); }
+  70% { color: color-mix(in srgb, #ff0000 40%, #303133); }
+  80% { color: color-mix(in srgb, #ff8800 28%, #303133); }
+  90% { color: color-mix(in srgb, #00e000 14%, #303133); }
+  100% { color: #303133; font-weight: 400; }
+}
+/* 闪动：前 3 秒每 0.5 秒一次明暗，之后保持不透明，只剩颜色渐淡 */
+@keyframes rainbow-blink {
+  0%, 100% { opacity: 1; text-shadow: 0 0 6px currentColor; }
+  50% { opacity: 0.25; text-shadow: none; }
 }
 .tag {
   flex: none;
@@ -224,6 +330,9 @@ async function remove(plugin) {
   gap: 8px;
   padding-top: 12px;
   border-top: 1px solid #e4e7ed;
+}
+.new-name {
+  margin-bottom: 8px;
 }
 .buttons .add {
   display: inline-flex;

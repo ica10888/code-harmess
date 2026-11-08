@@ -12,8 +12,8 @@ class ChatSessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ChatSession
-        fields = ["id", "title", "created_at"]
-        read_only_fields = ["id", "created_at"]
+        fields = ["id", "title", "created_at", "request_count", "turn_count", "tool_count"]
+        read_only_fields = ["id", "created_at", "request_count", "turn_count", "tool_count"]
 
     def validate_title(self, value):
         return value.strip() or ChatSession._meta.get_field("title").default
@@ -67,6 +67,7 @@ class PluginSerializer(serializers.Serializer):
 
     name = serializers.CharField(read_only=True)
     default = serializers.BooleanField(read_only=True)  # 默认插件：所有会话都有，不能删除
+    skill_name = serializers.CharField(read_only=True, required=False, allow_null=True)  # frontmatter 的 name；只有列表带
 
 
 class PluginDetailSerializer(PluginSerializer):

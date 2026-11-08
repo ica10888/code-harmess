@@ -110,4 +110,23 @@ const currentEffort = computed(() => efforts.value[effortSlider.value])
   font-size: 12px;
   white-space: nowrap;
 }
+/* 窄屏：压缩下拉框和滑块，隐藏「推理强度」标题，让发送这一行仍在一行内 */
+@media (max-width: 768px) {
+  .model-picker {
+    gap: 8px;
+  }
+  .model {
+    width: 92px;
+  }
+  .effort-title {
+    display: none;
+  }
+  .slider {
+    width: 84px;
+    margin: 0 10px;
+  }
+  .slider :deep(.el-slider__marks-text) {
+    font-size: 10px;
+  }
+}
 </style>

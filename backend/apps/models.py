@@ -15,6 +15,10 @@ class ChatSession(models.Model):
     conversation = models.JSONField(default=list, blank=True)
     # 工作区上一次检测时的快照 {相对路径: [mtime_ns, size]}；和这次的快照比较，就知道有文件创建或变更
     file_snapshot = models.JSONField(default=dict, blank=True)
+    # 计数（core 的 Agent.counter 累加的结果）：请求 Responses API 的次数、turn 的次数、工具使用次数
+    request_count = models.PositiveIntegerField(default=0)
+    turn_count = models.PositiveIntegerField(default=0)
+    tool_count = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -133,3 +137,36 @@ class StageLog(models.Model):
     class Meta:
         ordering = ["seq"]
         constraints = [models.UniqueConstraint(fields=["stage", "seq"], name="unique_log_seq_per_stage")]
+
+
+class RequestStat(models.Model):
+    """一次请求 Responses API 的记录（core 的 RequestStat）：响应时间和 token。会话统计的平均值由它算出。"""
+
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="request_stats")
+    seconds = models.FloatField()
+    input_tokens = models.PositiveIntegerField(default=0)
+    output_tokens = models.PositiveIntegerField(default=0)
+    input_messages = models.JSONField(default=list, blank=True)  # 发给模型的对话；内容大，明细列表不带它，展开时单独取
+    output_messages = models.JSONField(default=list, blank=True)
+    turn = models.ForeignKey("TurnStat", null=True, on_delete=models.CASCADE, related_name="request_stats")  # 所属的轮
+
+
+class ToolStat(models.Model):
+    """一次工具使用的记录（core 的 ToolStat）：工具类型、耗时、读和写的文件数。"""
+
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="tool_stats")
+    name = models.CharField(max_length=64)
+    seconds = models.FloatField()
+    files_read = models.PositiveIntegerField(default=0)
+    files_written = models.PositiveIntegerField(default=0)
+    paths = models.JSONField(default=list, blank=True)  # 读 / 写的文件路径（不存内容）
+    turn = models.ForeignKey("TurnStat", null=True, on_delete=models.CASCADE, related_name="tool_stats")  # 所属的轮
+
+
+class TurnStat(models.Model):
+    """一个 turn 的记录（core 的 TurnStat）：总耗时、这个 turn 里的请求次数和工具使用次数。"""
+
+    session = models.ForeignKey(ChatSession, on_delete=models.CASCADE, related_name="turn_stats")
+    seconds = models.FloatField()
+    requests = models.PositiveIntegerField(default=0)
+    tools = models.PositiveIntegerField(default=0)

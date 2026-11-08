@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
@@ -9,8 +9,12 @@ import EurekaRunPanel from '../components/EurekaRunPanel.vue'
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
 import ModelPicker from '../components/ModelPicker.vue'
+import PreviewPane from '../components/PreviewPane.vue'
+import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
 import PluginPanel from '../components/PluginPanel.vue'
+import SessionStats from '../components/SessionStats.vue'
 import { loadLastSession, pickSession, saveLastSession } from '../utils/lastSession'
+import { extractLinks } from '../utils/eurekaRun'
 import { buildSendOptions } from '../utils/options'
 import { sendWithAttachment } from '../utils/sendFlow'
 import { createTypewriter } from '../utils/typewriter'
@@ -19,6 +23,8 @@ import { formatSize, uploadErrorMessage } from '../utils/upload'
 const sessions = ref([])
 const currentId = ref(null)
 const messages = ref([])
+// 最近一条带「选中提示」的消息：右栏据此让被选中的插件 / 工作流变色
+const lastSelection = computed(() => [...messages.value].reverse().find((m) => m.skill_selection))
 const draft = ref('')
 const pendingFile = ref(null) // 已选好、还没上传的文件；点「发送」时才上传
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
@@ -36,6 +42,10 @@ const RIGHT_FABS = [
   { view: 'plugins', icon: '🧩', title: '插件和工作流' },
 ]
 const view = ref('chat') // sessions | chat | plugins（插件和工作流合在一页）
+const tab = ref('chat') // 会话框上面的标签：chat（对话）| workspace（工作区）| preview（预览）
+const previewLinks = ref([]) // 预览页要内嵌的链接：取编号最大（最新）那次工作流运行日志里的
+let previewRunId = 0
+const openTarget = ref(null) // 要在工作区打开的文件 { path }
 const listEl = ref(null)
 
 let closeStream = null
@@ -63,10 +73,40 @@ async function selectSession(id) {
   currentId.value = id
   saveLastSession(id) // 刷新后回到这个会话
   pendingFile.value = null // 选好还没传的文件属于原来的会话，不能带到新会话里
+  previewLinks.value = [] // 预览属于原来的会话
+  previewRunId = 0
   messages.value = []
   addMessages(await listMessages(id))
   const last = messages.value.length ? messages.value[messages.value.length - 1].id : 0
   closeStream = openStream(id, last, (m) => addMessages([m]))
+}
+
+const currentSession = computed(() => sessions.value.find((s) => s.id === currentId.value))
+
+// 每次请求完成后更新一次计数：重新取会话列表，只取当前会话的三个计数
+async function refreshCounts() {
+  const fresh = (await listSessions()).find((s) => s.id === currentId.value)
+  const current = sessions.value.find((s) => s.id === currentId.value)
+  if (fresh && current) Object.assign(current, fresh)
+}
+
+/** 工作流进度更新：把最新一次运行日志里的链接给预览页。 */
+function onRunUpdate(run) {
+  const links = extractLinks(run)
+  if (run.id < previewRunId || !links.length) return
+  previewRunId = run.id
+  if (links.join() !== previewLinks.value.join()) previewLinks.value = links
+}
+
+/** 工作流刚完成：有链接就跳到预览页。 */
+function onRunFinished(run) {
+  if (extractLinks(run).length) tab.value = 'preview'
+}
+
+/** 文件变更提示条里点了一个文件：切到工作区标签并打开它。 */
+function openInWorkspace(path) {
+  openTarget.value = { path }
+  tab.value = 'workspace'
 }
 
 async function newSession() {
@@ -110,6 +150,7 @@ async function send() {
     // 成功才清空；失败时保留文字和文件，用户可以直接重试
     draft.value = ''
     pendingFile.value = null
+    refreshCounts()
   } catch (e) {
     if (e.stage === 'upload') {
       ElMessage.error(`文件上传失败，文本未发送：${uploadErrorMessage(e.cause)}`)
@@ -229,7 +270,27 @@ onBeforeUnmount(() => closeStream && closeStream())
     </div>
 
     <main class="main">
-      <div ref="listEl" class="messages">
+      <!-- 标签行：选择会话、切换到工作区 -->
+      <div class="tabs">
+        <el-tabs v-model="tab" class="tab-switch">
+          <el-tab-pane label="💬 会话" name="chat" />
+          <el-tab-pane label="📁 工作区" name="workspace" />
+          <el-tab-pane label="🌐 预览" name="preview" />
+        </el-tabs>
+        <el-select
+          :model-value="currentId"
+          size="small"
+          class="session-select"
+          placeholder="选择会话"
+          @change="selectSession"
+        >
+          <el-option v-for="s in sessions" :key="s.id" :label="s.title || '新会话'" :value="s.id" />
+        </el-select>
+      </div>
+
+      <PreviewPane v-show="tab === 'preview'" :links="previewLinks" />
+      <WorkspaceBrowser v-if="tab === 'workspace'" :session-id="currentId" :target="openTarget" />
+      <div v-show="tab === 'chat'" ref="listEl" class="messages">
         <div v-if="!messages.length" class="empty">发送第一条消息，开始对话</div>
         <div v-for="m in messages" :key="m.id" class="row" :class="m.role">
           <div class="bubble">{{ m.content }}</div>
@@ -243,7 +304,7 @@ onBeforeUnmount(() => closeStream && closeStream())
             :plugins="m.skill_selection.plugins"
             :workflows="m.skill_selection.workflows"
           />
-          <FileChangeBanner v-if="m.file_change && currentId" :session-id="currentId" :text="m.file_change.text" :files="m.file_change.files" />
+          <FileChangeBanner v-if="m.file_change" :text="m.file_change.text" :files="m.file_change.files" @open-file="openInWorkspace" />
           <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
           <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
           <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->
@@ -253,11 +314,13 @@ onBeforeUnmount(() => closeStream && closeStream())
             :session-id="currentId"
             :run-id="m.eureka.run.id"
             :initial-status="m.eureka.run.status"
+            @update="onRunUpdate"
+            @finished="onRunFinished"
           />
         </div>
       </div>
 
-      <div class="composer">
+      <div v-show="tab === 'chat'" class="composer">
         <MarkdownPreview :text="draft" />
         <el-input
           v-model="draft"
@@ -271,6 +334,11 @@ onBeforeUnmount(() => closeStream && closeStream())
         <div class="actions">
           <FileUploadButton v-model="pendingFile" :disabled="sending" />
           <div class="right">
+            <SessionStats
+              v-if="currentSession"
+              :session-id="currentSession.id"
+              :label="`${currentSession.request_count} 次请求 · ${currentSession.turn_count} 轮 · ${currentSession.tool_count} 次工具`"
+            />
             <ModelPicker v-model="modelChoice" :disabled="sending" />
             <el-button
               type="primary"
@@ -297,8 +365,13 @@ onBeforeUnmount(() => closeStream && closeStream())
         {{ rightCollapsed ? '‹' : '×' }}
       </el-button>
       <div v-show="!rightCollapsed" class="panels">
-        <PluginPanel :session-id="currentId" />
-        <PluginPanel :session-id="currentId" kind="workflow" />
+        <PluginPanel :session-id="currentId" :selected="lastSelection?.skill_selection.plugins" :selected-key="lastSelection?.id" />
+        <PluginPanel
+          :session-id="currentId"
+          kind="workflow"
+          :selected="lastSelection?.skill_selection.workflows"
+          :selected-key="lastSelection?.id"
+        />
       </div>
     </aside>
   </div>
@@ -373,6 +446,23 @@ onBeforeUnmount(() => closeStream && closeStream())
   display: flex;
   flex-direction: column;
   min-width: 0;
+}
+.tabs {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 20px;
+  border-bottom: 1px solid #e4e7ed;
+}
+.tab-switch :deep(.el-tabs__header) {
+  margin: 0;
+}
+.tab-switch :deep(.el-tabs__nav-wrap::after) {
+  display: none;
+}
+.session-select {
+  width: 200px;
 }
 .messages {
   flex: 1;
@@ -493,9 +583,10 @@ onBeforeUnmount(() => closeStream && closeStream())
   .notice {
     max-width: 90%;
   }
+  /* 发送这一行保持在一行内，不换行 */
   .composer .actions,
   .composer .actions .right {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 8px;
   }
 }

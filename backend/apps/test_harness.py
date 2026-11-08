@@ -95,6 +95,20 @@ class RunTurnTests(TestCase):
         assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "c1"
         assert "secret-content" in tool_message["content"]
 
+    def test_stats_are_saved_per_turn_with_their_own_requests_and_tools(self):
+        session = ChatSession.objects.create(owner_key="k")
+        first = FakeProvider(calls(ToolCall("c1", "no_such_tool", {})), text("a", usage=Usage(10, 2)))
+        run(first, "one", session=session)
+        run(FakeProvider(text("b", usage=Usage(20, 3))), "two", session=session)
+
+        one, two = session.turn_stats.order_by("id")
+        assert [(r.input_tokens, r.output_tokens) for r in one.request_stats.order_by("id")][-1] == (10, 2)
+        assert [t.name for t in one.tool_stats.all()] == ["no_such_tool"]
+        assert one.request_stats.count() == one.requests and one.tool_stats.count() == one.tools
+        assert [(r.input_tokens, r.output_tokens) for r in two.request_stats.order_by("id")][-1] == (20, 3)
+        assert two.tool_stats.count() == 0
+        assert session.request_stats.count() == one.requests + two.requests  # 没有记录漏挂到轮上
+
     def test_model_gets_all_workspace_tools_and_a_web_prompt(self):
         provider = FakeProvider(text("ok"))
         run(provider)

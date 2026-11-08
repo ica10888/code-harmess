@@ -41,9 +41,9 @@ class WorkflowApiTests(TestCase):
         res = self.upload()
 
         assert res.status_code == 201
-        assert res.json() == {"name": "flow.md", "default": False}
+        assert res.json() == {"name": "flow.md", "default": False, "skill_name": None}
         assert (self.dir / "flow.md").read_text(encoding="utf-8") == VALID
-        assert self.client.get(self.base).json() == [{"name": "flow.md", "default": False}]
+        assert self.client.get(self.base).json() == [{"name": "flow.md", "default": False, "skill_name": "flow"}]
 
     def test_detail_returns_full_content_for_own_and_default(self):
         self.upload()
@@ -87,7 +87,7 @@ class WorkflowApiTests(TestCase):
     def test_default_workflow_is_listed_but_not_deletable_or_overridable(self):
         (self.default_dir / "base.md").write_text("# 默认", encoding="utf-8")
 
-        assert self.client.get(self.base).json() == [{"name": "base.md", "default": True}]
+        assert self.client.get(self.base).json() == [{"name": "base.md", "default": True, "skill_name": None}]
         url = f"{self.base}base.md/"
         assert self.client.delete(url).status_code == 403
         assert self.upload(md("base.md")).status_code == 409
@@ -99,3 +99,31 @@ class WorkflowApiTests(TestCase):
             with self.assertRaises(PluginError) as e:
                 workflows.delete_workflow(session, evil)
             assert e.exception.status == 404, evil
+
+
+class WorkflowEditTests(WorkflowApiTests):
+    """在线新建（POST JSON）和编辑（PUT）。"""
+
+    def test_create_from_text(self):
+        res = self.client.post(self.base, {"name": "flow.md", "content": VALID}, format="json")
+
+        assert res.status_code == 201
+        assert (self.dir / "flow.md").read_text(encoding="utf-8") == VALID
+        assert self.client.post(self.base, {"name": "flow.md", "content": VALID}, format="json").status_code == 409
+        assert self.client.post(self.base, {"name": "x.md", "content": "没有 frontmatter"}, format="json").status_code == 400
+
+    def test_update_overwrites_and_validates(self):
+        self.upload()
+        url = f"{self.base}flow.md/"
+        new = VALID.replace("示例", "改过的")
+
+        assert self.client.put(url, {"content": new}, format="json").status_code == 200
+        assert (self.dir / "flow.md").read_text(encoding="utf-8") == new
+        assert self.client.put(url, {"content": "坏的"}, format="json").status_code == 400
+        assert (self.dir / "flow.md").read_text(encoding="utf-8") == new  # 校验失败不改文件
+        assert self.client.put(f"{self.base}nope.md/", {"content": new}, format="json").status_code == 404
+
+    def test_default_cannot_be_updated(self):
+        (self.default_dir / "base.md").write_text("# 默认", encoding="utf-8")
+
+        assert self.client.put(f"{self.base}base.md/", {"content": VALID}, format="json").status_code == 403

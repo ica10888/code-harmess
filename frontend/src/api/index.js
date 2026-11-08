@@ -101,7 +101,30 @@ export const addWorkflow = (sessionId, file) => {
 export const deleteWorkflow = (sessionId, name) =>
   http.delete(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`)
 
+/** 在线新建：不用上传文件，直接提交文件名和全文。返回新建的项 {name, default}。 */
+export const createPlugin = (sessionId, name, content) =>
+  http.post(`/sessions/${sessionId}/plugins/`, { name, content }).then((r) => r.data)
+export const createWorkflow = (sessionId, name, content) =>
+  http.post(`/sessions/${sessionId}/workflows/`, { name, content }).then((r) => r.data)
+/** 编辑：用新全文覆盖，返回更新后的详情。默认项不能改（403）。 */
+export const updatePlugin = (sessionId, name, content) =>
+  http.put(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`, { content }).then((r) => r.data)
+export const updateWorkflow = (sessionId, name, content) =>
+  http.put(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`, { content }).then((r) => r.data)
+
 // --- eureka 工作流进度 ---
 /** 某个会话里一次工作流运行的进度：{ id, plugin, status, error, stages: [{ key, title, status, error, logs }] }。 */
 export const getEurekaRun = (sessionId, runId) =>
   http.get(`/sessions/${sessionId}/eureka-runs/${runId}/`).then((r) => r.data)
+
+/** 会话统计的平均值：{ turn: { avg_seconds, avg_requests, avg_tools }, request: { avg_seconds, avg_input_tokens, avg_output_tokens }, tool: { avg_seconds, avg_files_read, avg_files_written } }。 */
+export const getSessionStats = (sessionId) => http.get(`/sessions/${sessionId}/stats/`).then((r) => r.data)
+/** 会话统计明细（最近的在前）：{ turns: [{ id, seconds, requests, tools, request_list: [{ id, seconds, input_tokens, output_tokens }], tool_list: [{ id, name, seconds, files_read, files_written }] }] }。 */
+export const getSessionStatsDetail = (sessionId) => http.get(`/sessions/${sessionId}/stats/detail/`).then((r) => r.data)
+/** 展开一次请求：{ input: [...], output: [...] }，发给模型的对话和模型的输出（provider 的原始 JSON）。 */
+export const getRequestContent = (sessionId, requestId) =>
+  http.get(`/sessions/${sessionId}/stats/requests/${requestId}/`).then((r) => r.data)
+
+/** 保存工作区里一个已有文件的新内容（覆盖）。 */
+export const writeWorkspaceFile = (sessionId, path, content) =>
+  http.put(`/sessions/${sessionId}/workspace/file/`, { path, content }).then((r) => r.data)

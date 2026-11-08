@@ -1,12 +1,10 @@
 <script setup>
-import WorkspaceFiles from './WorkspaceFiles.vue'
-
 // 文件变更提示条（EurekaBanner 的一份拷贝）：显示在模型那条回复的下面。文本和文件列表来自后端，这里只负责展示。
-// 它不是消息内容，也不会发给模型。
+// 它不是消息内容，也不会发给模型。点一个文件，通知父组件跳转到工作区打开它。
+defineEmits(['open-file'])
 defineProps({
   text: { type: String, required: true },
   files: { type: Array, default: () => [] },
-  sessionId: { type: String, required: true },
 })
 </script>
 
@@ -14,9 +12,10 @@ defineProps({
   <div class="file-change" role="status" aria-live="polite">
     <div>{{ text }}</div>
     <ul v-if="files.length" class="files">
-      <li v-for="f in files" :key="f.path">{{ f.kind === 'created' ? '新建' : '修改' }}　{{ f.path }}</li>
+      <li v-for="f in files" :key="f.path" class="file" title="在工作区打开" @click="$emit('open-file', f.path)">
+        {{ f.kind === 'created' ? '新建' : '修改' }}　{{ f.path }}
+      </li>
     </ul>
-    <WorkspaceFiles :session-id="sessionId" />
   </div>
 </template>
 
@@ -35,6 +34,10 @@ defineProps({
   line-height: 1.5;
   word-break: break-word;
   animation: file-change-pop 0.5s ease-out;
+}
+.file {
+  cursor: pointer;
+  text-decoration: underline;
 }
 .files {
   margin: 4px 0 0;
