@@ -52,6 +52,11 @@ def text(s, usage=None):
     return Reply(texts=[s], usage=usage)
 
 
+def picks(*names):
+    """skill_selector 那次「选 skill」请求的模型回复：{"skills": [名字, ...]}。排在正式回复之前。"""
+    return text(json.dumps({"skills": list(names)}))
+
+
 def calls(*tool_calls):
     return Reply(tool_calls=list(tool_calls))
 

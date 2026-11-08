@@ -1,21 +1,9 @@
-// 插件列表的纯逻辑：勾选状态、列表增删替换、上传前检查、错误文案。方便测试，不碰 DOM。
+// 插件列表的纯逻辑：列表删除、上传前检查、错误文案。方便测试，不碰 DOM。
 // 插件用「名称」标识：它就是后端存放这个插件的目录名，在一个会话里唯一。
 
 // 插件文件的大小上限和普通文件上传共用，和后端 config.ini 的 [storage] max_upload_mb 保持一致；
 // 这里先拦一道，省得白传一个大文件才被拒绝，真正的限制在后端。
 const MAX_UPLOAD_MB = 20
-
-/** 已勾选的插件名称，按列表顺序。 */
-export const checkedPlugins = (plugins) => plugins.filter((p) => p.enabled).map((p) => p.name)
-
-/**
- * 「删除」按钮要删的插件：已勾选、并且不是默认插件。
- * 默认插件所有会话都有、不能删除（后端会拒绝，这里提前就不让它进来），勾选它只表示「在这个会话里要用」。
- */
-export const deletablePlugins = (plugins) => plugins.filter((p) => p.enabled && !p.default)
-
-/** 用服务器返回的新状态替换列表里同名的一项；返回新数组，不改原数组。 */
-export const replaceByName = (plugins, updated) => plugins.map((p) => (p.name === updated.name ? updated : p))
 
 /** 删掉指定名称的一项；返回新数组，不改原数组。 */
 export const removeByName = (plugins, name) => plugins.filter((p) => p.name !== name)
@@ -46,7 +34,7 @@ export function pluginErrorMessage(err) {
   return res.data?.detail || BY_STATUS[res.status] || `操作失败（${res.status}）`
 }
 
-// --- 内容检查：勾选后 core 要读 frontmatter 里的 name 和 description，把全文注入对话 ---
+// --- 内容检查：skill_selector 要读 frontmatter 里的 name 和 description 做目录 ---
 //
 // 规则和后端 core 的 skills._load 保持一致；这里只是提前检查、给出明确提示，真正的校验在后端（会返回 400）。
 // frontmatter 一般就在文件最前面，所以只读开头一小段，不用把大文件整个读进内存。

@@ -1,11 +1,10 @@
 """插件管理接口测试：每个会话一份，原样存在 <存储路径>/input/<会话id>/skills/<文件名>。
 
-增删改查都落在文件上，没有数据库表。「是否勾选」存在 skills/state.json 里。
+增删查都落在文件上，没有数据库表。没有「勾选」：用哪个插件由 core 的 skill_selector 在每句话之前选。
 上传的要求：文件名以 .md 结尾，并且开头有 frontmatter（name + description，core 要用）；这部分由 test_inject.py 专门测。
-这里的测试用的都是合规的内容（见 md()）。勾选后把全文注入对话也在 test_inject.py。
+这里的测试用的都是合规的内容（见 md()）。选中后把全文注入对话在 test_inject.py。
 """
 
-import json
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -58,7 +57,7 @@ class PluginApiTests(TestCase):
         res = self.upload(md("notes.md"))
 
         assert res.status_code == 201
-        assert res.json() == {"name": "notes.md", "enabled": False, "default": False}
+        assert res.json() == {"name": "notes.md", "default": False}
         assert (self.skills_dir / "notes.md").read_bytes() == DEFAULT_BODY.encode("utf-8")
 
     def test_content_must_have_frontmatter_but_nothing_else_about_it_is_checked(self):
@@ -73,8 +72,6 @@ class PluginApiTests(TestCase):
         self.upload(md("a.md", body))
         assert (self.skills_dir / "a.md").read_bytes() == body
 
-    def test_new_plugin_is_not_checked_by_default(self):
-        assert self.upload().json()["enabled"] is False
 
     def test_chinese_spaces_and_dots_in_the_name_are_fine(self):
         for name in ["我的笔记.md", "my notes.md", "v1.2.final.md", "UPPER.MD", "a-b_c.md"]:
@@ -130,10 +127,6 @@ class PluginApiTests(TestCase):
     def test_missing_file_field_is_a_400(self):
         assert self.client.post(self.base, {}, format="multipart").status_code == 400
 
-    def test_state_json_can_never_be_clobbered_by_an_upload(self):
-        # 插件只能是 .md，所以和 state.json 不可能同名
-        assert self.upload(md("state.json")).status_code == 400
-
     # --- 查 ---
 
     def test_list_returns_the_sessions_plugins_ordered_by_name(self):
@@ -144,7 +137,7 @@ class PluginApiTests(TestCase):
 
         assert res.status_code == 200
         assert [p["name"] for p in res.json()] == ["alpha.md", "mid.md", "zeta.md"]
-        assert set(res.json()[0]) == {"name", "enabled", "default"}  # 列表里不带正文
+        assert set(res.json()[0]) == {"name", "default"}  # 列表里不带正文
 
     def test_empty_session_has_an_empty_list_and_listing_does_not_create_the_directory(self):
         assert self.client.get(self.base).json() == []
@@ -191,57 +184,21 @@ class PluginApiTests(TestCase):
         assert other.get(self.base).status_code == 404
         assert self.upload(client=other).status_code == 404
         assert other.get(item).status_code == 404
-        assert other.patch(item, {"enabled": True}, format="json").status_code == 404
         assert other.delete(item).status_code == 404
         assert (self.skills_dir / "notes.md").exists()
 
     def test_unknown_session_is_a_404(self):
         assert self.client.get("/api/sessions/00000000-0000-0000-0000-000000000000/plugins/").status_code == 404
 
-    # --- 改（勾选 / 取消勾选）---
-
-    def test_patch_toggles_enabled_and_it_is_remembered(self):
-        self.upload()
-        item = f"{self.base}notes.md/"
-
-        on = self.client.patch(item, {"enabled": True}, format="json")
-        assert on.status_code == 200 and on.json() == {"name": "notes.md", "enabled": True, "default": False}
-        assert [p["enabled"] for p in self.client.get(self.base).json()] == [True]
-
-        assert self.client.patch(item, {"enabled": False}, format="json").json()["enabled"] is False
-        assert [p["enabled"] for p in self.client.get(self.base).json()] == [False]
-
-    def test_enabled_state_is_kept_in_a_json_file_next_to_the_plugins(self):
-        self.upload()
-        self.client.patch(f"{self.base}notes.md/", {"enabled": True}, format="json")
-
-        assert json.loads((self.skills_dir / "state.json").read_text(encoding="utf-8")) == {"notes.md": True}
-
-    def test_patch_rejects_non_boolean_and_cannot_rename(self):
-        self.upload()
-        item = f"{self.base}notes.md/"
-        assert self.client.patch(item, {"enabled": "maybe"}, format="json").status_code == 400
-        assert self.client.patch(item, {}, format="json").status_code == 400
-        self.client.patch(item, {"name": "hacked.md", "enabled": True}, format="json")
-        assert (self.skills_dir / "notes.md").exists() and not (self.skills_dir / "hacked.md").exists()
-
-    def test_a_corrupt_state_file_is_treated_as_nothing_checked(self):
-        self.upload()
-        (self.skills_dir / "state.json").write_text("{not json", encoding="utf-8")
-        assert [p["enabled"] for p in self.client.get(self.base).json()] == [False]
-        assert self.client.patch(f"{self.base}notes.md/", {"enabled": True}, format="json").status_code == 200
-
     # --- 删 ---
 
-    def test_delete_removes_the_file_and_its_checked_state(self):
+    def test_delete_removes_the_file(self):
         self.upload()
         item = f"{self.base}notes.md/"
-        self.client.patch(item, {"enabled": True}, format="json")
 
         assert self.client.delete(item).status_code == 204
 
         assert not (self.skills_dir / "notes.md").exists()
-        assert "notes.md" not in json.loads((self.skills_dir / "state.json").read_text(encoding="utf-8"))
         assert self.client.get(self.base).json() == []
 
     def test_deleting_twice_or_an_unknown_name_is_a_404(self):
@@ -251,13 +208,6 @@ class PluginApiTests(TestCase):
         assert self.client.delete(item).status_code == 404
         assert self.client.get(f"{self.base}nope.md/").status_code == 404
 
-    def test_can_upload_again_after_deleting_and_it_starts_unchecked(self):
-        self.upload()
-        item = f"{self.base}notes.md/"
-        self.client.patch(item, {"enabled": True}, format="json")
-        self.client.delete(item)
-
-        assert self.upload().json()["enabled"] is False
 
     def test_delete_cannot_be_aimed_outside_the_skills_directory(self):
         keep = self.storage / "input" / self.sid / "file" / "keep.md"
@@ -275,29 +225,6 @@ class PluginApiTests(TestCase):
 
     # --- 对接 core 的那一步：空方法，只验证它被调用 ---
 
-    def test_core_hook_is_called_on_create_toggle_and_delete_with_the_session(self):
-        with mock.patch("apps.services.apply_to_core") as hook:
-            self.upload()
-            self.client.patch(f"{self.base}notes.md/", {"enabled": True}, format="json")
-            self.client.delete(f"{self.base}notes.md/")
-
-        assert [c.args[0] for c in hook.call_args_list] == ["created", "updated", "deleted"]
-        assert all(c.args[1].id == ChatSession.objects.get(pk=self.sid).id for c in hook.call_args_list)
-        assert [c.args[2] for c in hook.call_args_list] == [
-            {"name": "notes.md", "enabled": False, "default": False},
-            {"name": "notes.md", "enabled": True, "default": False},
-            {"name": "notes.md", "enabled": True, "default": False},
-        ]
-
-    def test_core_hook_is_not_called_when_the_request_is_rejected(self):
-        with mock.patch("apps.services.apply_to_core") as hook:
-            self.upload(md("a.txt"))
-            self.client.delete(f"{self.base}nope.md/")
-        hook.assert_not_called()
-
-    def test_core_hook_is_an_empty_method_that_does_nothing_and_returns_none(self):
-        session = ChatSession.objects.get(pk=self.sid)
-        assert services.apply_to_core("created", session, {"name": "x.md", "enabled": False}) is None
 
     def test_skills_dir_helper_sits_next_to_the_file_workspace(self):
         session = ChatSession.objects.get(pk=self.sid)
@@ -307,7 +234,7 @@ class PluginApiTests(TestCase):
 
 class DefaultPluginTests(TestCase):
     """默认插件：config.ini 的 [storage] default_skills_dir 指向的目录。里面的 .md 对所有会话可见，不能删除，
-    各会话各自勾选（勾选状态仍存在会话自己的 state.json 里）。"""
+    也不能被同名上传盖住。"""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -383,46 +310,11 @@ class DefaultPluginTests(TestCase):
         assert (self.defaults / "format.md").read_bytes() == "# 默认格式\n".encode("utf-8")
         assert "format.md" in [p["name"] for p in self.client.get(self.base).json()]
 
-    def test_the_core_hook_is_not_called_for_a_refused_delete(self):
-        with mock.patch("apps.services.apply_to_core") as hook:
-            self.client.delete(f"{self.base}format.md/")
-        hook.assert_not_called()
 
     def test_deleting_from_one_session_never_affects_another(self):
         other = self.new_session(self.client)
         self.client.delete(f"{self.base}format.md/")
         assert "format.md" in [p["name"] for p in self.client.get(f"/api/sessions/{other}/plugins/").json()]
-
-    # --- 各会话各自勾选 ---
-
-    def test_default_plugins_start_unchecked(self):
-        assert [p["enabled"] for p in self.client.get(self.base).json()] == [False, False]
-
-    def test_checking_a_default_plugin_is_saved_per_session(self):
-        other = self.new_session(self.client)
-
-        res = self.client.patch(f"{self.base}format.md/", {"enabled": True}, format="json")
-
-        assert res.status_code == 200 and res.json() == {"name": "format.md", "enabled": True, "default": True}
-        assert self.client.get(self.base).json()[0]["enabled"] is True
-        assert self.client.get(f"/api/sessions/{other}/plugins/").json()[0]["enabled"] is False  # 另一个会话不受影响
-
-    def test_the_checked_state_lives_in_the_sessions_own_state_json_not_in_the_default_directory(self):
-        self.client.patch(f"{self.base}format.md/", {"enabled": True}, format="json")
-
-        state_file = self.storage / "input" / self.sid / "skills" / "state.json"
-        assert json.loads(state_file.read_text(encoding="utf-8")) == {"format.md": True}
-        assert sorted(p.name for p in self.defaults.iterdir()) == ["format.md", "review.md"]  # 默认目录里一个文件没多
-
-    def test_unchecking_works_too(self):
-        self.client.patch(f"{self.base}format.md/", {"enabled": True}, format="json")
-        res = self.client.patch(f"{self.base}format.md/", {"enabled": False}, format="json")
-        assert res.json()["enabled"] is False
-
-    def test_the_core_hook_is_called_when_a_default_plugin_is_toggled(self):
-        with mock.patch("apps.services.apply_to_core") as hook:
-            self.client.patch(f"{self.base}format.md/", {"enabled": True}, format="json")
-        assert hook.call_args.args[0] == "updated" and hook.call_args.args[2]["name"] == "format.md"
 
     # --- 同名上传 ---
 
@@ -463,8 +355,7 @@ class DefaultPluginTests(TestCase):
             assert self.client.get(self.base).json() == []
         assert not (self.defaults / "nope").exists()  # 读取不会把它建出来
 
-    def test_session_plugin_and_state_still_work_next_to_defaults(self):
+    def test_session_plugin_still_works_next_to_defaults(self):
         self.upload("mine.md")
-        self.client.patch(f"{self.base}mine.md/", {"enabled": True}, format="json")
         assert self.client.delete(f"{self.base}mine.md/").status_code == 204
         assert [p["name"] for p in self.client.get(self.base).json()] == ["format.md", "review.md"]

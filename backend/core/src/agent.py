@@ -37,7 +37,8 @@ from prompt import (
     load_project_context,
 )
 from providers import DeepSeekProvider, Provider, Reply, ToolCall, ToolResult, Usage
-from skills import Skill, discover_skills, skills_index
+from skill_selector import select_skills as pick_skills
+from skills import Skill, discover_skills, skills_index, skills_message
 from tools import ALL_TOOLS, Tool, ToolError, read_file
 
 # 同一次用户输入之后，最多连续几轮「模型要工具 → 执行 → 回灌」。防止模型原地打转、烧 token。
@@ -126,6 +127,7 @@ class Answer:
 
     texts: list[str]
     paused: bool = False
+    selected: list[str] = field(default_factory=list)  # 这一轮 skill_selector 选中的 skill 名（哪怕全文已在对话里、没再放）
 
 
 @dataclass
@@ -192,6 +194,7 @@ class Agent:
         sessions: list[Session] | None = None,
         start: str = DEFAULT_SESSION,
         reload: Callable[[Session], Session] | None = None,
+        select_skills: bool = True,
     ) -> None:
         if max_tool_rounds < 1:
             raise ValueError(f"max_tool_rounds must be >= 1, got {max_tool_rounds}")
@@ -228,6 +231,8 @@ class Agent:
         # 默认读终端（多行、方向键、历史），每个 Agent 一个，历史不跨会话；测试里注入脚本化输入
         self.get_user_input = get_user_input or make_default_reader(self.commands)
         self.max_tool_rounds = max_tool_rounds
+        # 先选后载：正式请求之前先问一次模型要加载哪些 skill（见 skill_selector.py），默认开启
+        self.select_skills = select_skills
         # 只在终端显示、不发给模型的命令：参数是命令后面的文字
         self._local_commands: dict[str, Callable[[str], None]] = {
             "persona": self._persona_command,
@@ -391,6 +396,40 @@ class Agent:
             f"User request: {request}"
         )
 
+    def _selected_skills_message(
+        self,
+        user_input: str,
+        history: list[dict],
+        extra_context: Callable[[list[str]], str | None] | None = None,
+    ) -> tuple[str | None, list[str]]:
+        """先选后载：问一次模型这句话要用哪些 skill，把选中的 SKILL.md 全文合成一条要放进对话的 user 消息。
+
+        history 里已经有全文的 skill 不再放一遍（每句话都重复塞全文会白白占满上下文）。
+        extra_context：选中之后用选中的 skill 名字回调调用方，它返回的文字作为紧随其后的一条 user 消息
+        （后端用它追加同名工作流的输出格式；core 不认识「工作流」，只管把名字交出去）。
+        返回 (消息, 这一轮选中的 skill 名)。没开、没有可用 skill、没选中、选择请求失败，都是 (None, [])：
+        选择只是锦上添花，绝不拖垮正式的一轮。
+        """
+        if not self.select_skills:
+            return None, []
+        usable = [s for s in self.skills.values() if s.model_invocable]
+        try:
+            refs = pick_skills(self.provider, user_input, usable)
+            already = "\n".join(str(m.get("content")) for m in history if m.get("role") == "user")
+            fresh = [r for r in refs if f'<skill name="{r.name}">' not in already]
+            message, warnings = skills_message([r.path for r in fresh])
+            extra = extra_context([r.name for r in refs]) if extra_context and refs else None
+            chosen = [r.name for r in refs]
+            refs = fresh
+        except Exception as e:  # noqa: BLE001  选择只是锦上添花，任何失败都不能拖垮正式的一轮
+            print(f"\033[2m· 选择 skill 失败，已忽略：{e}\033[0m", file=sys.stderr)
+            return None, []
+        for warning in warnings:
+            print(f"\033[2m· {warning}\033[0m", file=sys.stderr)
+        if message:
+            print(f"\033[2m· 已加载 skill {', '.join(r.name for r in refs)}\033[0m")
+        return "\n\n".join(m for m in (message, extra) if m) or None, chosen
+
     @staticmethod
     def _log_usage(usage: Usage) -> None:
         """每次调模型后一行灰字，打到 stderr：不和回复混在一起。看 in 的数字怎么随轮数涨，就是上下文管理的起点。"""
@@ -428,6 +467,9 @@ class Agent:
                     print(f"\033[91m未知命令 /{command}\033[0m。可用：{available}（输入 / 看说明）")
                     continue
                 else:
+                    selected, _ = self._selected_skills_message(user_input, conversation)
+                    if selected:
+                        conversation.append({"role": "user", "content": selected})
                     conversation.append({"role": "user", "content": user_input})
                 tool_rounds = 0
 
@@ -505,6 +547,7 @@ class Agent:
         model: str | None = None,
         effort: str | None = None,
         skills_message: str | None = None,
+        extra_context: Callable[[list[str]], str | None] | None = None,
     ) -> Answer:
         """没有终端的一问一答（后端用）：处理一句用户的话，返回模型说的文字。
 
@@ -517,10 +560,16 @@ class Agent:
 
         model / effort：这一句话用哪个模型、多强的推理；不给就用 provider 自己的默认。工具循环的每一轮都用同一组。
 
-        skills_message：用户勾选的 skill 全文（skills.skills_message 的结果）。放在这句话之前、作为一条 user 消息，
+        skills_message：调用方直接给的 skill 全文（skills.skills_message 的结果）。放在这句话之前、作为一条 user 消息，
         之后一直留在对话里，和 run() 里 /skill名 调用的效果一样；这一轮失败时对话整体回滚，它也不会留下。
+        不给就由 skill_selector 先选一次，选中的全文放在同一个位置。
+
+        extra_context：先选后载选中 skill 之后，用它们的名字回调；返回的文字紧跟在 skill 全文后面作为 user 消息。
         """
         conversation = [*self.current.conversation]
+        chosen: list[str] = []
+        if not skills_message:  # 调用方给了就不再选
+            skills_message, chosen = self._selected_skills_message(user_input, conversation, extra_context)
         if skills_message:
             conversation.append({"role": "user", "content": skills_message})
         conversation.append({"role": "user", "content": user_input})
@@ -531,11 +580,11 @@ class Agent:
             texts.extend(reply.texts)
             if not reply.tool_calls:
                 self.current.conversation[:] = conversation
-                return Answer(texts)
+                return Answer(texts, selected=chosen)
             conversation.extend(self.provider.tool_results([self._execute(call) for call in reply.tool_calls]))
         # 到上限：结果已回灌，每个 tool_call id 都有回复，用户下一句接在后面即可（和 run() 一致）
         self.current.conversation[:] = conversation
-        return Answer(texts, paused=True)
+        return Answer(texts, paused=True, selected=chosen)
 
 
 def _count_notes(memory_dir: str) -> int:
@@ -577,6 +626,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_positive_int,
         default=MAX_TOOL_ROUNDS,
         help=f"一次用户输入后最多连续几轮工具调用，到了暂停交回给你（默认 {MAX_TOOL_ROUNDS}）",
+    )
+    p.add_argument(
+        "--no-select-skills",
+        action="store_true",
+        help="不要在每句话之前先问一次模型要加载哪些 skill（默认会问，多一次请求）",
     )
     return p.parse_args(argv)
 
@@ -692,6 +746,7 @@ def main() -> None:
         system=build_system_prompt(ctx),
         max_tool_rounds=args.max_rounds,
         skills=skills,
+        select_skills=not args.no_select_skills,
         sessions=[persona_session(p, ctx, memory_dir) for p in personas],
         start=args.persona or DEFAULT_SESSION,
         reload=lambda s: persona_session(load_persona(s.source, known_tools), ctx, memory_dir),

@@ -3,7 +3,7 @@
 // 刷新页面后，后端消息里带着 run 的 id 和状态，没跑完的会继续拉取，直到结束。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { getEurekaRun } from '../api'
-import { STATUS_LABEL, nextDelay, progressSummary, shouldPoll, stageIcon } from '../utils/eurekaRun'
+import { STATUS_LABEL, nextDelay, progressSummary, shouldPoll, splitLinks, stageIcon } from '../utils/eurekaRun'
 
 const props = defineProps({
   sessionId: { type: String, required: true },
@@ -57,7 +57,12 @@ onBeforeUnmount(() => {
             <span class="stage-title">{{ s.title }}</span>
           </div>
           <ul v-if="s.logs.length" class="logs">
-            <li v-for="(line, i) in s.logs" :key="i">{{ line }}</li>
+            <li v-for="(line, i) in s.logs" :key="i">
+              <template v-for="(part, j) in splitLinks(line)" :key="j">
+                <a v-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
+                <template v-else>{{ part.text }}</template>
+              </template>
+            </li>
           </ul>
           <p v-if="s.error" class="error">{{ s.error }}</p>
         </li>

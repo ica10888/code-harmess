@@ -19,7 +19,7 @@ from rest_framework.test import APIClient
 
 from apps import harness, workflows
 from apps.models import ChatSession, Eureka, Message
-from apps.test_harness import FakeProvider, sse_events, text
+from apps.test_harness import FakeProvider, picks, sse_events, text
 
 REVIEW_SCHEMA = """{
   "type": "array",
@@ -220,12 +220,11 @@ class EurekaFlowTests(TestCase):
         self.sid = self.client.post("/api/sessions/", {}, format="json").json()["id"]
 
     def check_plugin(self, name="代码审查.md", enabled=True):
-        from urllib.parse import quote
-
-        assert self.client.patch(f"/api/sessions/{self.sid}/plugins/{quote(name)}/", {"enabled": enabled}, format="json").status_code == 200
+        """没有勾选了：记下「这个会话要用的 skill」，下一次 send 时由 skill_selector 选它（模型回复里给出名字）。"""
+        self.picked = ["code-review"] if enabled else []
 
     def send(self, reply, content="请审查"):
-        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(reply))):
+        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(picks(*getattr(self, "picked", [])), text(reply))):
             res = self.client.post(f"/api/sessions/{self.sid}/messages/", {"content": content}, format="json")
         assert res.status_code == 201, res.content
         return res.json()
@@ -343,7 +342,7 @@ class EurekaFlowTests(TestCase):
 
     def test_streaming_sends_the_eureka_in_the_done_event_and_it_is_saved(self):
         self.check_plugin()
-        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(GOOD))):
+        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(picks("code-review"), text(GOOD))):
             res = self.client.post(f"/api/sessions/{self.sid}/messages/stream/", {"content": "请审查"}, format="json")
             events = sse_events(res)
 
@@ -352,7 +351,7 @@ class EurekaFlowTests(TestCase):
         assert Eureka.objects.count() == 1
 
     def test_streaming_without_a_match_has_a_null_eureka(self):
-        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text("没有 JSON"))):
+        with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(picks(), text("没有 JSON"))):
             res = self.client.post(f"/api/sessions/{self.sid}/messages/stream/", {"content": "x"}, format="json")
             events = sse_events(res)
         assert events[-1][1]["eureka"] is None

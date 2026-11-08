@@ -18,7 +18,7 @@ from django.conf import settings
 from agent import DEFAULT_SESSION, Agent  # noqa: E402
 from prompt import PromptContext, build_system_prompt  # noqa: E402
 from providers import DeepSeekProvider  # noqa: E402
-from skills import load_skill_file, skills_message  # noqa: E402
+from skills import Skill, load_skill_file  # noqa: E402
 from tools import workspace_tools  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,22 @@ def workflow_dir(session) -> str:
     return os.path.join(settings.HARNESS_STORAGE_DIR, "input", str(session.id), "workflow")
 
 
+def candidate_skills(session) -> list[Skill]:
+    """「先选后载」的候选：默认插件和这个会话自己的插件里，core 读得了的（读不了 / 格式不对的跳过）。
+
+    用不用、用哪个，由 core 的 skill_selector 在每句话之前选；没有用户勾选这回事。
+    """
+    from . import services  # 避免循环导入：services 也 import 了 harness
+
+    skills = []
+    for path in services.all_plugin_paths(session):
+        try:
+            skills.append(load_skill_file(path))
+        except (OSError, ValueError):
+            continue
+    return skills
+
+
 def _agent(session, model: str | None = None) -> Agent:
     """造一个只服务这一次请求的 Agent，对话是这个会话已有的。
 
@@ -100,45 +116,37 @@ def _agent(session, model: str | None = None) -> Agent:
         max_tool_rounds=settings.HARNESS_MAX_TOOL_ROUNDS,
         context_budget=settings.HARNESS_CONTEXT_BUDGET,
         keep_tool_results=settings.HARNESS_KEEP_TOOL_RESULTS,
+        skills=candidate_skills(session),
     )
     agent.sessions[DEFAULT_SESSION].conversation[:] = session.conversation
     return agent
 
 
 def _finish(session, agent: Agent, answer) -> str:
-    """整轮成功后：保存对话，拼出要展示给用户的完整回复（run_turn 和 stream_turn 共用）。"""
+    """整轮成功后：保存对话，拼出要展示给用户的完整回复（run_turn 和 stream_turn 共用）。
+
+    skill_selector 这一轮选中的 skill 名顺手记在 session.selected_skills 上（不入库的临时属性），
+    由 services.save_assistant_message 取走并存成 SkillSelection；返回类型不变，已有的调用方和测试都不用动。
+    """
     session.conversation = json.loads(json.dumps(agent.current.conversation))  # 确保能存进 JSONField
     session.save(update_fields=["conversation"])
+    session.selected_skills = list(answer.selected)
     texts = [*answer.texts, PAUSED_NOTICE.format(rounds=settings.HARNESS_MAX_TOOL_ROUNDS)] if answer.paused else answer.texts
     return "\n\n".join(texts) or EMPTY_REPLY
 
 
-def skills_message_for(session) -> str | None:
-    """用户勾选的插件里，这个会话的对话还没带上的，合成一条要注入的消息（core 的 skills.skills_message）。
+def workflow_context_for(session):
+    """core 选中 skill 之后的回调：把同名工作流的输出格式（schema）作为额外的一条消息放进对话。
 
-    已经注入过的不再注入：每句话都重复塞一遍全文会白白占满上下文。判断办法很直接——对话里已经有这个 skill 的
-    <skill name="..."> 块就算注入过，不额外存状态。读不了 / 格式不对的 skill 由 core 跳过并给出警告，这里记下日志，
-    绝不让一个坏文件拖垮整次请求。
+    返回 names -> 文字 | None。对话里已经有这个工作流的 <workflow name="..."> 块就不再放（每句话重复塞全文会占满上下文）。
     """
-    from . import services  # 避免循环导入：services 也 import 了 harness
+    from . import workflows  # 避免循环导入
 
-    already = "\n".join(str(m.get("content")) for m in session.conversation if m.get("role") == "user")
-    paths = []
-    for path in services.checked_plugin_paths(session):
-        try:
-            name = load_skill_file(path).name
-        except (OSError, ValueError):
-            paths.append(path)  # 读不了的也交给 core，由它统一给警告并跳过
-            continue
-        if f'<skill name="{name}">' not in already:
-            paths.append(path)
-    message, warnings = skills_message(paths)
-    for warning in warnings:
-        logger.warning("session %s: %s", session.id, warning)
-    from . import workflows  # 同上，避免循环导入
+    def context(names: list[str]) -> str | None:
+        already = "\n".join(str(m.get("content")) for m in session.conversation if m.get("role") == "user")
+        return workflows.workflow_message(session, names, already)
 
-    workflow = workflows.workflow_message(session, already)  # 勾选的工作流：把输出格式也告诉模型
-    return "\n\n".join(m for m in (message, workflow) if m) or None
+    return context
 
 
 def run_turn(session, user_text: str, model: str | None = None, effort: str | None = None) -> str:
@@ -150,7 +158,7 @@ def run_turn(session, user_text: str, model: str | None = None, effort: str | No
     return _finish(
         session,
         agent,
-        agent.respond(user_text, model=model, effort=effort, skills_message=skills_message_for(session)),
+        agent.respond(user_text, model=model, effort=effort, extra_context=workflow_context_for(session)),
     )
 
 
@@ -164,7 +172,7 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
     pieces: queue.Queue = queue.Queue()
     outcome: dict = {}
     agent = _agent(session, model)
-    injected = skills_message_for(session)  # 在线程外算好：读文件和读数据库都放在请求线程里
+    extra_context = workflow_context_for(session)
 
     def work():
         try:
@@ -173,7 +181,7 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
                 on_text=lambda t: pieces.put(("delta", t)),
                 model=model,
                 effort=effort,
-                skills_message=injected,
+                extra_context=extra_context,
             )
         except Exception as e:  # 交给生成器所在的线程去抛
             outcome["error"] = e

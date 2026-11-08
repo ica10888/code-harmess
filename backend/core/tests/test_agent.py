@@ -1,6 +1,5 @@
 """Agent 循环测试：注入 fake provider 和脚本化输入，只看循环的形状。"""
 
-
 import pytest
 
 from agent import (
@@ -576,8 +575,6 @@ def _reloadable(tmp_path, tools="read_file", body="你是猪八戒。"):
 # --- 仓库里的三个西游记角色 ---------------------------------------------------------
 
 
-
-
 # --- respond：没有终端的一问一答入口（后端用），和 run() 共用同一套一轮逻辑 ---------------
 
 
@@ -711,7 +708,9 @@ def test_respond_stream_adds_one_separator_even_when_middle_rounds_say_nothing(t
     f = tmp_path / "s.txt"
     f.write_text("x")
     tool = lambda i: Reply(tool_calls=[ToolCall(f"c{i}", "read_file", {"path": str(f)})])
-    provider = StreamingProvider([Reply(texts=["look"], tool_calls=tool(0).tool_calls), tool(1), tool(2), Reply(texts=["done"])])
+    provider = StreamingProvider(
+        [Reply(texts=["look"], tool_calls=tool(0).tool_calls), tool(1), tool(2), Reply(texts=["done"])]
+    )
     pieces: list[str] = []
 
     answer = Agent(provider, [read_file], scripted()).respond("go", on_text=pieces.append)
@@ -819,3 +818,170 @@ def test_respond_failure_does_not_keep_the_skills_message_either():
         agent.respond("hi", skills_message="<skill>X</skill>")
 
     assert agent.current.conversation == []
+
+
+# --- 先选后载：正式请求之前，先问一次模型要加载哪些 skill，再把选中的正文放进对话 --------------
+
+
+class SelectingProvider(FakeProvider):
+    """第一次 chat 是「选 skill」的请求（没有工具），之后才是正式回复；接受 effort 等可选参数。"""
+
+    def chat(self, conversation, tools, system="", on_text=None, model=None, effort=None):
+        return super().chat(conversation, tools, system)
+
+
+def _skill(tmp_path, name, body):
+    from skills import load_skill_file
+
+    path = tmp_path / f"{name}.md"
+    path.write_text(f"---\nname: {name}\ndescription: 做 {name}\n---\n{body}\n", encoding="utf-8")
+    return load_skill_file(str(path))
+
+
+def test_respond_selects_then_loads_only_the_picked_skill_before_the_user_message(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "ALPHA-BODY"), _skill(tmp_path, "beta", "BETA-BODY")]
+    provider = SelectingProvider([Reply(texts=['{"skills": ["beta"]}']), Reply(texts=["done"])])
+    agent = Agent(provider, [], scripted(), skills=skills, select_skills=True)
+
+    answer = agent.respond("请做 beta")
+
+    assert answer.texts == ["done"]
+    assert len(provider.chats) == 2
+    assert provider.chats[0][1]["content"] == "请做 beta"  # 第一次是选择请求：目录 + 用户输入
+    contents = [m["content"] for m in provider.chats[1]]
+    assert "BETA-BODY" in contents[0] and "ALPHA-BODY" not in contents[0]  # 被选中的正文在用户消息之前
+    assert contents[1] == "请做 beta"
+    assert "BETA-BODY" in str(agent.current.conversation[0])  # 留在对话里
+
+
+def test_nothing_selected_means_normal_conversation(tmp_path):
+    provider = SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["done"])])
+    agent = Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "ALPHA-BODY")], select_skills=True)
+
+    agent.respond("你好")
+
+    assert [m["content"] for m in provider.chats[1]] == ["你好"]
+
+
+def test_selection_failure_does_not_break_the_turn(tmp_path):
+    class Broken(SelectingProvider):
+        def chat(self, conversation, tools, system="", on_text=None, model=None, effort=None):
+            if not self.chats:
+                self.chats.append([])
+                raise RuntimeError("boom")
+            return super().chat(conversation, tools, system)
+
+    provider = Broken([Reply(texts=["done"])])
+    agent = Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+
+    assert agent.respond("hi").texts == ["done"]
+
+
+def test_selection_can_be_turned_off(tmp_path):
+    provider = SelectingProvider([Reply(texts=["done"])])
+
+    Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=False).respond("hi")
+
+    assert len(provider.chats) == 1
+
+
+def test_run_also_selects_before_each_user_message(tmp_path):
+    provider = SelectingProvider([Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["ok"])])
+
+    Agent(provider, [], scripted("hello"), skills=[_skill(tmp_path, "alpha", "ALPHA-BODY")], select_skills=True).run()
+
+    assert "ALPHA-BODY" in provider.chats[1][0]["content"] and provider.chats[1][1]["content"] == "hello"
+
+
+def test_selection_is_on_by_default(tmp_path):
+    provider = SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["done"])])
+
+    Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")]).respond("hi")
+
+    assert len(provider.chats) == 2  # 选择请求 + 正式请求
+
+
+def test_no_select_skills_flag_turns_it_off():
+    assert parse_args([]).no_select_skills is False
+    assert parse_args(["--no-select-skills"]).no_select_skills is True
+
+
+def test_a_skill_already_in_the_conversation_is_not_injected_again(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "ALPHA-BODY")]
+    provider = SelectingProvider(
+        [Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["one"]), Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["two"])]
+    )
+    agent = Agent(provider, [], scripted(), skills=skills)
+
+    agent.respond("第一句")
+    agent.respond("第二句")
+
+    assert sum("ALPHA-BODY" in str(m["content"]) for m in agent.current.conversation if m.get("role") == "user") == 1
+
+
+def test_respond_calls_extra_context_with_the_selected_names_and_appends_its_message_to_the_skill_message(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "ALPHA-BODY")]
+    provider = SelectingProvider([Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["done"])])
+    seen = []
+
+    def extra(names):
+        seen.append(names)
+        return "EXTRA-FOR-" + ",".join(names)
+
+    Agent(provider, [], scripted(), skills=skills).respond("hi", extra_context=extra)
+
+    assert seen == [["alpha"]]
+    contents = [m["content"] for m in provider.chats[1]]
+    assert contents[0].index("ALPHA-BODY") < contents[0].index("EXTRA-FOR-alpha")  # 同一条消息里，skill 全文在前
+    assert contents[1] == "hi"
+
+
+def test_extra_context_is_asked_even_when_the_skill_is_already_in_the_conversation(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "ALPHA-BODY")]
+    provider = SelectingProvider(
+        [Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["one"]), Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["two"])]
+    )
+    seen = []
+    agent = Agent(provider, [], scripted(), skills=skills)
+
+    agent.respond("a", extra_context=lambda names: seen.append(names))
+    agent.respond("b", extra_context=lambda names: seen.append(names))
+
+    assert seen == [["alpha"], ["alpha"]]  # 回调自己决定要不要重复，core 只负责把选中的名字交出去
+
+
+def test_extra_context_is_skipped_when_nothing_is_selected(tmp_path):
+    provider = SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["done"])])
+    called = []
+
+    Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")]).respond("hi", extra_context=called.append)
+
+    assert called == []
+
+
+def test_respond_reports_the_selected_skill_names_in_the_answer_even_if_already_loaded(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "ALPHA-BODY"), _skill(tmp_path, "beta", "BETA-BODY")]
+    provider = SelectingProvider(
+        [
+            Reply(texts=['{"skills": ["alpha", "beta"]}']),
+            Reply(texts=["one"]),
+            Reply(texts=['{"skills": ["alpha"]}']),
+            Reply(texts=["two"]),
+        ]
+    )
+    agent = Agent(provider, [], scripted(), skills=skills)
+
+    first = agent.respond("a")
+    second = agent.respond("b")
+
+    assert first.selected == ["alpha", "beta"]
+    assert second.selected == ["alpha"]  # 这一轮选中了，哪怕全文已经在对话里、不再重复放
+
+
+def test_answer_selected_is_empty_when_selection_is_off_or_nothing_is_picked(tmp_path):
+    skills = [_skill(tmp_path, "alpha", "A")]
+
+    off = Agent(SelectingProvider([Reply(texts=["x"])]), [], scripted(), skills=skills, select_skills=False).respond("a")
+    none = Agent(SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["x"])]), [], scripted(), skills=skills).respond("a")
+
+    assert off.selected == [] and none.selected == []

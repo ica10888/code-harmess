@@ -1,4 +1,4 @@
-"""勾选插件后把全文注入对话：后端调 core 的 skills.skills_message，经 Agent.respond 放进上下文。
+"""先选后载：后端把默认插件和会话插件交给 core 的 skill_selector，正式请求前先选，再把选中的全文放进对话。没有勾选。
 
 覆盖：上传时的 frontmatter 校验、勾选的会话插件和默认插件都会注入、没勾选的不注入、坏文件不拖垮请求、
 透传到 core 的参数、对话保存和失败回滚。模型用 FakeProvider，不调用真实 API。
@@ -14,7 +14,7 @@ from rest_framework.test import APIClient
 
 from apps import harness
 from apps.models import ChatSession
-from apps.test_harness import FakeProvider, run, sse_events, text
+from apps.test_harness import FakeProvider, picks, sse_events, text
 
 FM = "---\nname: {name}\ndescription: {desc}\n---\n\n{body}\n"
 
@@ -76,13 +76,16 @@ class UploadValidationTests(TestCase):
         assert saved.read_bytes() == body.encode("utf-8")
 
 
-class RecordingProvider(FakeProvider):
+class SelectingProvider(FakeProvider):
+    """第一次 chat 是「选 skill」的请求（没有工具），之后才是正式回复；记下每次的 model / effort。"""
+
     def chat(self, conversation, tools, system="", on_text=None, model=None, effort=None):
+        self.options = [*getattr(self, "options", []), (model, effort)]
         return super().chat(conversation, tools, system, on_text)
 
 
-class InjectionTests(TestCase):
-    """勾选的插件（会话自己的 + 默认的）全文在这一轮被放进模型看到的上下文。"""
+class SelectionTests(TestCase):
+    """后端把默认插件和会话插件都交给 core：正式请求前先选，再加载选中的。没有「勾选」。"""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -101,17 +104,6 @@ class InjectionTests(TestCase):
     def add(self, filename, content):
         res = self.client.post(self.plugins, {"file": upload_file(filename, content)}, format="multipart")
         assert res.status_code == 201, res.content
-        return res
-
-    def check(self, name, enabled=True):
-        from urllib.parse import quote
-
-        res = self.client.patch(f"{self.plugins}{quote(name)}/", {"enabled": enabled}, format="json")
-        assert res.status_code == 200
-        return res
-
-    def user_messages(self, provider, call=0):
-        return [m["content"] for m in provider.calls[call]["conversation"] if m.get("role") == "user"]
 
     def send(self, provider, content="请处理", **extra):
         with mock.patch("apps.harness.get_provider", return_value=provider):
@@ -119,161 +111,151 @@ class InjectionTests(TestCase):
         assert res.status_code == 201, res.content
         return res
 
-    # --- 注入内容 ---
+    def users(self, provider, call):
+        return [m["content"] for m in provider.calls[call]["conversation"] if m.get("role") == "user"]
 
-    def test_a_checked_session_plugin_is_injected_in_full_before_the_users_message(self):
-        self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        provider = RecordingProvider(text("ok"))
+    # --- 选 ---
+
+    def test_the_model_picks_a_default_plugin_and_it_is_loaded_before_the_users_message(self):
+        provider = SelectingProvider(picks("default-one"), text("ok"))
 
         self.send(provider, "请处理")
 
-        users = self.user_messages(provider)
-        assert len(users) == 2 and "MINE-BODY" in users[0] and '<skill name="mine">' in users[0]
+        assert len(provider.calls) == 2
+        assert provider.calls[0]["tools"] == []  # 第一次是选择请求
+        assert "default-one" in str(provider.calls[0]["conversation"][0]["content"])  # 目录里有它
+        users = self.users(provider, 1)
+        assert len(users) == 2 and "DEFAULT-BODY" in users[0] and '<skill name="default-one">' in users[0]
         assert users[1] == "请处理"  # 用户的话原样在最后
 
-    def test_a_checked_default_plugin_is_injected_too(self):
-        self.check("默认.md")
-        provider = RecordingProvider(text("ok"))
+    def test_the_session_s_own_plugins_are_candidates_too(self):
+        self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
+        provider = SelectingProvider(picks("mine"), text("ok"))
 
         self.send(provider)
 
-        assert "DEFAULT-BODY" in self.user_messages(provider)[0]
+        assert "mine" in str(provider.calls[0]["conversation"][0]["content"])
+        assert "MINE-BODY" in self.users(provider, 1)[0]
 
-    def test_defaults_come_before_the_sessions_own_in_the_injected_message(self):
+    def test_only_the_picked_plugins_are_loaded(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        self.check("默认.md")
-        provider = RecordingProvider(text("ok"))
+        provider = SelectingProvider(picks("mine"), text("ok"))
 
         self.send(provider)
 
-        message = self.user_messages(provider)[0]
-        assert message.index("DEFAULT-BODY") < message.index("MINE-BODY")
+        assert all("DEFAULT-BODY" not in m for m in self.users(provider, 1))
 
-    def test_unchecked_plugins_are_not_injected(self):
+    def test_defaults_come_before_the_sessions_own_in_the_catalog(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        provider = RecordingProvider(text("ok"))
+        provider = SelectingProvider(picks(), text("ok"))
 
         self.send(provider)
 
-        assert self.user_messages(provider) == ["请处理"]  # 默认插件也没勾，所以只有用户这一句
+        catalog = str(provider.calls[0]["conversation"][0]["content"])
+        assert catalog.index("default-one") < catalog.index("mine")
 
-    def test_unchecking_stops_the_injection_for_the_next_message(self):
+    def test_nothing_picked_means_a_normal_single_request(self):
+        provider = SelectingProvider(picks(), text("ok"))
+
+        self.send(provider, "你好")
+
+        assert self.users(provider, 1) == ["你好"]
+
+    def test_another_sessions_plugins_are_not_candidates(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        self.check("mine.md", enabled=False)
-        provider = RecordingProvider(text("ok"))
-
-        self.send(provider)
-
-        assert all("MINE-BODY" not in m for m in self.user_messages(provider))
-
-    def test_another_sessions_checked_plugins_do_not_leak_in(self):
-        self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
         other = self.client.post("/api/sessions/", {}, format="json").json()["id"]
-        provider = RecordingProvider(text("ok"))
+        provider = SelectingProvider(picks(), text("ok"))
 
         with mock.patch("apps.harness.get_provider", return_value=provider):
             self.client.post(f"/api/sessions/{other}/messages/", {"content": "hi"}, format="json")
 
-        assert all("MINE-BODY" not in m for m in self.user_messages(provider))
+        assert "mine" not in str(provider.calls[0]["conversation"][0]["content"])
+
+    def test_a_plugin_the_model_invents_is_ignored(self):
+        provider = SelectingProvider(picks("no-such-skill"), text("ok"))
+
+        self.send(provider, "你好")
+
+        assert self.users(provider, 1) == ["你好"]
 
     # --- 对话里怎么留 ---
 
-    def test_the_injected_skill_is_saved_in_the_conversation_once_and_not_repeated_every_turn(self):
+    def test_the_loaded_skill_is_saved_in_the_conversation_once_and_not_repeated_every_turn(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        provider = RecordingProvider(text("one"), text("two"), text("three"))
+        provider = SelectingProvider(picks("mine"), text("one"), picks("mine"), text("two"), picks("mine"), text("three"))
 
         self.send(provider, "第一句")
         self.send(provider, "第二句")
         self.send(provider, "第三句")
 
-        # 和 /skill名 一致：第一次注入后留在历史里，之后每轮都带着它，但不会重复注入
-        third = self.user_messages(provider, call=2)
-        assert sum("MINE-BODY" in m for m in third) == 1
+        # 第一次加载后留在历史里，之后每轮都带着它，但不会重复加载
+        assert sum("MINE-BODY" in m for m in self.users(provider, 5)) == 1
         saved = ChatSession.objects.get(pk=self.sid).conversation
         assert sum("MINE-BODY" in str(m.get("content")) for m in saved) == 1
 
-    def test_a_newly_checked_plugin_is_injected_on_the_next_message_even_in_a_long_conversation(self):
-        provider = RecordingProvider(text("one"), text("two"))
+    def test_a_plugin_added_later_can_be_picked_on_the_next_message(self):
+        provider = SelectingProvider(picks(), text("one"), picks("late"), text("two"))
         self.send(provider, "第一句")
         self.add("late.md", skill("late", "后来的", "LATE-BODY"))
-        self.check("late.md")
 
         self.send(provider, "第二句")
 
-        assert any("LATE-BODY" in m for m in self.user_messages(provider, call=1))
+        assert any("LATE-BODY" in m for m in self.users(provider, 3))
 
     def test_the_user_visible_message_history_does_not_contain_the_skill_text(self):
-        # 注入的是发给模型的上下文，不是聊天记录：页面上看到的消息里不该出现整份插件正文
+        # 加载的是发给模型的上下文，不是聊天记录：页面上看到的消息里不该出现整份插件正文
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
 
-        self.send(RecordingProvider(text("ok")), "请处理")
+        self.send(SelectingProvider(picks("mine"), text("ok")), "请处理")
 
         shown = self.client.get(f"/api/sessions/{self.sid}/messages/").json()
         assert [m["content"] for m in shown if m["role"] == "user"] == ["请处理"]
 
     # --- 异常情况 ---
 
-    def test_a_checked_plugin_whose_file_has_no_frontmatter_is_skipped_and_the_request_still_works(self):
+    def test_a_plugin_file_without_frontmatter_is_not_a_candidate_and_the_request_still_works(self):
         # 老数据：以前允许上传任何 .md，里面可能有没有 frontmatter 的
         skills_dir = Path(harness.skills_dir(ChatSession.objects.get(pk=self.sid)))
         skills_dir.mkdir(parents=True)
         (skills_dir / "old.md").write_text("no frontmatter", encoding="utf-8")
-        self.check("old.md")
-        provider = RecordingProvider(text("ok"))
+        provider = SelectingProvider(picks(), text("ok"))
 
         res = self.send(provider)
 
-        assert all("no frontmatter" not in m for m in self.user_messages(provider))
+        assert "no frontmatter" not in str(provider.calls[0]["conversation"])
         assert res.json()[1]["content"] == "ok"  # 请求没有被一个坏文件拖垮
 
-    def test_a_checked_plugin_deleted_from_disk_is_skipped_silently(self):
+    def test_a_failing_selection_request_does_not_break_the_reply(self):
+        provider = SelectingProvider(RuntimeError("boom"), text("ok"))
+
+        res = self.send(provider, "你好")
+
+        assert res.json()[1]["content"] == "ok"
+
+    def test_a_failed_model_call_leaves_no_trace_of_the_loaded_skill_in_the_saved_conversation(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        (Path(harness.skills_dir(ChatSession.objects.get(pk=self.sid))) / "mine.md").unlink()
-        provider = RecordingProvider(text("ok"))
-
-        self.send(provider)
-
-        assert self.user_messages(provider) == ["请处理"]
-
-    def test_a_failed_model_call_leaves_no_trace_of_the_injected_skill_in_the_saved_conversation(self):
-        self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        failing = RecordingProvider(RuntimeError("boom"))
+        failing = SelectingProvider(picks("mine"), RuntimeError("boom"))
 
         res = self.send(failing)
 
         assert "调用模型失败" in res.json()[1]["content"]
         assert ChatSession.objects.get(pk=self.sid).conversation == []
 
-    def test_streaming_injects_the_same_way(self):
+    def test_streaming_loads_the_same_way(self):
         self.add("mine.md", skill("mine", "我的", "MINE-BODY"))
-        self.check("mine.md")
-        provider = RecordingProvider(text("ok"))
+        provider = SelectingProvider(picks("mine"), text("ok"))
 
         with mock.patch("apps.harness.get_provider", return_value=provider):
             res = self.client.post(f"/api/sessions/{self.sid}/messages/stream/", {"content": "请处理"}, format="json")
             events = sse_events(res)
 
         assert events[-1][0] == "done"
-        assert "MINE-BODY" in self.user_messages(provider)[0]
+        assert "MINE-BODY" in self.users(provider, 1)[0]
 
-    def test_model_and_effort_still_pass_through_with_skills_injected(self):
-        class Spy(RecordingProvider):
-            def chat(self, conversation, tools, system="", on_text=None, model=None, effort=None):
-                self.seen = (model, effort)
-                return FakeProvider.chat(self, conversation, tools, system, on_text)
-
-        self.check("默认.md")
-        provider = Spy(text("ok"))
+    def test_model_and_effort_pass_through_to_the_formal_request(self):
+        provider = SelectingProvider(picks("default-one"), text("ok"))
 
         self.send(provider, model="deepseek-v4-pro", effort="max")
 
-        assert provider.seen == ("deepseek-v4-pro", "max")
-        assert "DEFAULT-BODY" in self.user_messages(provider)[0]
+        assert provider.options[1] == ("deepseek-v4-pro", "max")  # 正式请求用用户选的；第 0 个是选择请求
+        assert "DEFAULT-BODY" in self.users(provider, 1)[0]

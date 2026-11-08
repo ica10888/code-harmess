@@ -33,3 +33,16 @@ export function nextDelay(attempt) {
   const n = Number.isFinite(attempt) && attempt > 0 ? attempt : 0
   return Math.min(500 + n * 500, 3000)
 }
+
+/** 把一行日志拆成文字 / 链接片段：只认 http(s)://，其余原样当文字（不用 v-html，避免注入）。 */
+export function splitLinks(text) {
+  const parts = []
+  let last = 0
+  for (const m of String(text).matchAll(/https?:\/\/[^\s<>"'，。）)]+/g)) {
+    if (m.index > last) parts.push({ text: text.slice(last, m.index) })
+    parts.push({ text: m[0], href: m[0] })
+    last = m.index + m[0].length
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) })
+  return parts
+}

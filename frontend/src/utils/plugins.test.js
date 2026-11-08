@@ -3,33 +3,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   checkSkillFile,
-  checkedPlugins,
-  deletablePlugins,
   pluginErrorMessage,
   removeByName,
-  replaceByName,
 } from './plugins.js'
 
-const list = [
-  { name: 'alpha', enabled: true },
-  { name: 'beta', enabled: false },
-  { name: 'gamma', enabled: true },
-]
-
-test('已勾选的插件：按列表顺序给出名称', () => {
-  assert.deepEqual(checkedPlugins(list), ['alpha', 'gamma'])
-  assert.deepEqual(checkedPlugins([]), [])
-})
-
-test('用服务器返回的新状态替换同名的一项，其余不动，也不改原数组', () => {
-  const next = replaceByName(list, { name: 'beta', enabled: true })
-  assert.deepEqual(next.map((p) => p.enabled), [true, true, true])
-  assert.equal(list[1].enabled, false)
-})
-
-test('替换一个不存在的名称，列表保持原样', () => {
-  assert.deepEqual(replaceByName(list, { name: 'nope', enabled: true }), list)
-})
+const list = [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }]
 
 test('删除指定名称的一项，不改原数组', () => {
   assert.deepEqual(removeByName(list, 'beta').map((p) => p.name), ['alpha', 'gamma'])
@@ -67,32 +45,13 @@ test('后端给了原因就显示后端的，没给就按状态码说一句', ()
   assert.match(pluginErrorMessage(new Error('Network Error')), /网络/)
 })
 
-// --- 默认插件：所有会话都有，不能删除，可以勾选 ---
-
-const withDefaults = [
-  { name: 'fmt.md', enabled: true, default: true },
-  { name: 'rev.md', enabled: false, default: true },
-  { name: 'mine.md', enabled: true, default: false },
-  { name: 'other.md', enabled: true, default: false },
-]
-
-test('可删除的插件只算会话自己的已勾选，默认插件即使勾选了也不算', () => {
-  assert.deepEqual(deletablePlugins(withDefaults).map((p) => p.name), ['mine.md', 'other.md'])
-})
-
-test('只勾选了默认插件时，没有可删除的', () => {
-  assert.deepEqual(deletablePlugins([{ name: 'fmt.md', enabled: true, default: true }]), [])
-})
-
-test('没有 default 字段的老数据当作可删除（兼容）', () => {
-  assert.deepEqual(deletablePlugins([{ name: 'a.md', enabled: true }]).map((p) => p.name), ['a.md'])
-})
+// --- 默认插件：所有会话都有，不能删除 ---
 
 test('后端拒绝删除默认插件（403）时，给出说得清楚的提示', () => {
   assert.match(pluginErrorMessage({ response: { status: 403, data: {} } }), /默认/)
 })
 
-// --- 内容检查：core 要用 frontmatter 里的 name 和 description ---
+// --- 内容检查：skill_selector 要用 frontmatter 里的 name 和 description ---
 
 import { checkSkillContent } from './plugins.js'
 

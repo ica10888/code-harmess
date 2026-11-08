@@ -1,6 +1,5 @@
 """业务层：视图只管 HTTP，真正的逻辑放这里。"""
 
-import json
 import logging
 import re
 import tempfile
@@ -11,7 +10,7 @@ from django.conf import settings
 from skills import load_skill_file  # core：能不能当 skill，以它的判断为准
 
 from . import harness
-from .models import ChatSession, Eureka, FileChange, Message
+from .models import ChatSession, Eureka, FileChange, Message, SkillSelection
 from .serializers import MessageSerializer
 
 
@@ -54,29 +53,13 @@ def name_session_from_first_message(session: ChatSession, user_text: str) -> str
 
 
 def used_plugin_names(session: ChatSession) -> list[str]:
-    """这个会话里正在用的插件的 frontmatter name：已勾选、并且 core 读得了的。
+    """这个会话里正在用的插件的 frontmatter name：由 skill_selector 选中、已经把全文放进对话的那些。
 
-    注入过的插件全文会一直留在对话里，所以只要还勾着，后面每一轮都算在用。读不了的（文件被删、格式坏了）不算。
+    全文以 <skill name="x"> 块的形式一直留在对话里（core 的 skills.skills_message 生成），所以只要对话里有，
+    后面每一轮都算在用。没有「勾选」这回事：用不用插件，全由模型在每句话之前选。
     """
-    names = []
-    for path in checked_plugin_paths(session):
-        try:
-            names.append(load_skill_file(path).name)
-        except (OSError, ValueError):
-            continue
-    return names
-
-
-def find_plugin_file(session: ChatSession, skill_name: str) -> str | None:
-    """frontmatter 的 name 等于 skill_name 的插件的文件名（默认插件在前）；没有就是 None。读不了的插件跳过。"""
-    candidates = [(_default_root() / n, n) for n in _default_names()] + [(_root(session) / n, n) for n in _md_names(_root(session))]
-    for path, filename in candidates:
-        try:
-            if load_skill_file(str(path)).name == skill_name:
-                return filename
-        except (OSError, ValueError):
-            continue
-    return None
+    seen = "\n".join(str(m.get("content")) for m in session.conversation if m.get("role") == "user")
+    return list(dict.fromkeys(re.findall(r'<skill name="([^"]+)">', seen)))
 
 
 def save_assistant_message(session: ChatSession, reply: str) -> Message:
@@ -89,15 +72,6 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
         from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
 
         hit = workflows.match_eureka(session, used_plugin_names(session), reply)
-        if not hit:
-            checked = workflows.checked_workflow(session)
-            # 勾了工作流却用不了（文件被删、schema 坏了）：先说这个；能用但回复不符合格式：说明为什么没有 eureka
-            notice = workflows.checked_problem(session)
-            if not notice and checked:
-                notice = f"这次回复没有按工作流 {checked['name']} 的格式输出，所以没有触发 eureka。可以补充要处理的内容后重试。"
-            if notice:
-                message.notice = notice
-                message.save(update_fields=["notice"])
         if hit:
             eureka = Eureka.objects.create(
                 message=message, plugin=hit["plugin"], workflow=hit["workflow"], text=workflows.eureka_text()
@@ -115,7 +89,38 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
         detect_file_change(session, message)
     except Exception:
         logging.getLogger(__name__).exception("文件变更检测失败，已忽略")
+    try:
+        save_skill_selection(session, message)
+    except Exception:
+        logging.getLogger(__name__).exception("选中 skill 提示保存失败，已忽略")
     return Message.objects.get(pk=message.pk)  # 重新取一次：让 message.eureka 能读到刚存的那条
+
+
+DEFAULT_SKILL_SELECTION_TEXT = "🧩 已为你选用插件：{plugins}"
+DEFAULT_SKILL_SELECTION_WORKFLOW_TEXT = "🧩 已为你选用插件：{plugins}，并启用工作流：{workflows} 🚀"
+
+
+def _joined(names: list[str]) -> str:
+    """名字用「和」连起来：a / a 和 b / a、b 和 c。"""
+    return names[0] if len(names) == 1 else "、".join(names[:-1]) + " 和 " + names[-1]
+
+
+def save_skill_selection(session: ChatSession, message: Message) -> SkillSelection | None:
+    """skill_selector 这一轮选中了 skill，就存一条 SkillSelection 挂在 message 上；工作流是其中有同名工作流的那些。
+
+    选中的名字由 harness._finish 记在 session.selected_skills 上；这里取走并清掉，免得带到下一轮。
+    判定出任何问题都只是「没有提示」，调用方会兜住异常，不影响回复本身。
+    """
+    plugins = list(getattr(session, "selected_skills", None) or [])
+    session.selected_skills = []
+    if not plugins:
+        return None
+    from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
+
+    flows = [name for name in plugins if workflows.workflow_for(session, name)]
+    template = DEFAULT_SKILL_SELECTION_WORKFLOW_TEXT if flows else DEFAULT_SKILL_SELECTION_TEXT
+    text = template.format(plugins=_joined(plugins), workflows=_joined(flows) if flows else "")
+    return SkillSelection.objects.create(message=message, text=text, plugins=plugins, workflows=flows)
 
 
 DEFAULT_FILE_CHANGE_TEXT = "📝 有文件变更"
@@ -258,17 +263,15 @@ def save_upload(session: ChatSession, uploaded) -> dict:
 #
 #   <存储路径>/input/<会话id>/skills/
 #       <文件名>.md          一个插件：用户上传什么就存什么，一个字节不改；文件名就是插件名
-#       state.json           哪些插件被勾选：{"<文件名>": true}
 #
 # 上传的文件要求：文件名以 .md 结尾，并且开头有 frontmatter（--- 包起来的 name 和 description）——
-# 勾选之后 core 要读它的 name / description，把全文注入对话（见 harness.skills_message_for）。文件本身原样保存，一个字节不改。
+# core 的 skill_selector 要读它的 name / description 做目录，被选中的才把全文放进对话。文件本身原样保存，一个字节不改。
 # 没有数据库表：目录就是数据，手动增删文件也立刻生效。
 #
 # 另外还有「默认插件」：config.ini 的 [storage] default_skills_dir 指向的目录，里面的 .md 对所有会话可见，
 # 不能删除（接口返回 403）。它们只读：不会被复制进会话目录，也不会被改动；
-# 「是否勾选」仍然各会话各自记在自己的 state.json 里。同名的上传会被拒绝（409），默认插件始终只有一份。
+# 同名的上传会被拒绝（409），默认插件始终只有一份。没有「勾选」：用哪个插件由 skill_selector 在每句话之前选。
 
-STATE_FILE = "state.json"
 MAX_NAME_LENGTH = 200
 # Windows 不能用作文件名的字符；Linux 上能存，但这套代码要能在两边都跑，所以统一拒绝
 _BAD_CHARS = re.compile(r'[<>:"|?*\x00-\x1f]')
@@ -301,15 +304,6 @@ def plugin_name(raw: str) -> str:
     return name
 
 
-def apply_to_core(action: str, session: ChatSession, plugin: dict) -> None:
-    """把插件的变化交给 core。action 是 "created" / "updated" / "deleted"；plugin 是 {"name", "enabled"}。
-
-    现阶段是空方法：这一步只留好位置，不碰 core。
-    以后在这里让 core 加载或移除这个插件（它的文件就在 harness.skills_dir(session) 里），
-    上面的接口和文件存储都不用动。
-    """
-
-
 def _root(session: ChatSession) -> Path:
     return Path(harness.skills_dir(session))
 
@@ -325,23 +319,8 @@ def _plugin_path(session: ChatSession, name: str) -> Path:
     return _root(session) / name
 
 
-def _read_state(session: ChatSession) -> dict:
-    """读勾选状态；文件不存在、内容坏了都当作「全都没勾」，不报错。"""
-    try:
-        data = json.loads((_root(session) / STATE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in data.items() if isinstance(v, bool)} if isinstance(data, dict) else {}
-
-
-def _write_state(session: ChatSession, state: dict) -> None:
-    root = _root(session)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _plugin(name: str, state: dict, default: bool = False) -> dict:
-    return {"name": name, "enabled": state.get(name, False), "default": default}
+def _plugin(name: str, default: bool = False) -> dict:
+    return {"name": name, "default": default}
 
 
 def _md_names(directory: Path) -> list[str]:
@@ -374,22 +353,20 @@ def _default_path(name: str) -> Path | None:
 
 def list_plugins(session: ChatSession) -> list[dict]:
     """列出这个会话能看到的插件：先是默认插件（所有会话都有），再是会话自己的；各自按名称排序。"""
-    state = _read_state(session)
-    defaults = [_plugin(n, state, default=True) for n in _default_names()]
-    own = [_plugin(n, state) for n in _md_names(_root(session))]
+    defaults = [_plugin(n, default=True) for n in _default_names()]
+    own = [_plugin(n) for n in _md_names(_root(session))]
     return defaults + own
 
 
 def get_plugin(session: ChatSession, name: str) -> dict:
     """详情：多一个 content（文件全文）。文件不是 UTF-8 时解不了的字节用 � 代替，不会崩。"""
-    state = _read_state(session)
     default = _default_path(name)
     if default is not None:
-        return {**_plugin(default.name, state, default=True), "content": default.read_bytes().decode("utf-8", errors="replace")}
+        return {**_plugin(default.name, default=True), "content": default.read_bytes().decode("utf-8", errors="replace")}
     path = _plugin_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到插件 {name}", status=404)
-    return {**_plugin(name, state), "content": path.read_bytes().decode("utf-8", errors="replace")}
+    return {**_plugin(name), "content": path.read_bytes().decode("utf-8", errors="replace")}
 
 
 def _check_frontmatter(raw: bytes) -> None:
@@ -410,7 +387,7 @@ def _check_frontmatter(raw: bytes) -> None:
 
 
 def create_plugin(session: ChatSession, uploaded) -> dict:
-    """上传一个 .md 文件：原样存成 skills/<文件名>，默认不勾选。大小上限和文件上传共用（config.ini 的 max_upload_mb）。"""
+    """上传一个 .md 文件：原样存成 skills/<文件名>。大小上限和文件上传共用（config.ini 的 max_upload_mb）。"""
     name = plugin_name(uploaded.name or "")
     if _default_path(name) is not None:  # 默认插件始终只有一份，不允许被同名文件盖住
         raise PluginError(f"已经有叫 {name} 的默认插件，请换一个文件名", status=409)
@@ -425,29 +402,7 @@ def create_plugin(session: ChatSession, uploaded) -> dict:
             f.write(raw)
     except FileExistsError:
         raise PluginError(f"已经有叫 {name} 的插件，请先删除再上传", status=409) from None
-    state = _read_state(session)
-    if state.pop(name, None) is not None:  # 以前同名插件留下的勾选状态不能带到新的上面
-        _write_state(session, state)
-    plugin = _plugin(name, state)
-    apply_to_core("created", session, plugin)
-    return plugin
-
-
-def set_plugin_enabled(session: ChatSession, name: str, enabled: bool) -> dict:
-    """勾选 / 取消勾选。默认插件也可以勾选，状态记在这个会话自己的 state.json 里（默认目录一个字节都不动）。"""
-    default = _default_path(name)
-    if default is not None:
-        name, is_default = default.name, True
-    else:
-        if not _plugin_path(session, name).is_file():
-            raise PluginError(f"找不到插件 {name}", status=404)
-        is_default = False
-    state = _read_state(session)
-    state[name] = enabled
-    _write_state(session, state)
-    plugin = _plugin(name, state, default=is_default)
-    apply_to_core("updated", session, plugin)
-    return plugin
+    return _plugin(name)
 
 
 def delete_plugin(session: ChatSession, name: str) -> None:
@@ -456,25 +411,11 @@ def delete_plugin(session: ChatSession, name: str) -> None:
     path = _plugin_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到插件 {name}", status=404)
-    state = _read_state(session)
-    plugin = _plugin(name, state)
     path.unlink()
-    if state.pop(name, None) is not None:
-        _write_state(session, state)
-    apply_to_core("deleted", session, plugin)
 
 
-def checked_plugin_paths(session: ChatSession) -> list[str]:
-    """这个会话里已勾选的插件的文件路径：默认插件在前、会话自己的在后，各自按名称排序。
-
-    文件已经不在了的（勾选后被手动删掉）直接跳过，不报错。注入给 core 用。
-    """
-    state = _read_state(session)
-    paths = []
-    for name in _default_names():
-        if state.get(name):
-            paths.append(str(_default_root() / name))
-    for name in _md_names(_root(session)):
-        if state.get(name):
-            paths.append(str(_root(session) / name))
+def all_plugin_paths(session: ChatSession) -> list[str]:
+    """这个会话能用的全部插件的文件路径（不管勾没勾）：默认插件在前、会话自己的在后。交给 core 做「先选后载」的候选。"""
+    paths = [str(_default_root() / n) for n in _default_names()]
+    paths += [str(_root(session) / n) for n in _md_names(_root(session))]
     return paths

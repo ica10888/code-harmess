@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
 
 from . import services, workflow_runtime, workflows
-from .models import ChatSession, Message, StageRun, WorkflowRun
+from .models import ChatSession, StageRun, WorkflowRun
 from .options import Effort, Model
 from .serializers import (
     ChatSessionSerializer,
@@ -21,7 +21,6 @@ from .serializers import (
     PluginDetailSerializer,
     PluginSerializer,
     EurekaRunSerializer,
-    PluginUpdateSerializer,
     SendMessageSerializer,
     WebhookLogSerializer,
 )
@@ -189,7 +188,7 @@ class PluginListView(APIView):
 
 
 class PluginDetailView(APIView):
-    """GET 看详情（带文件全文）；PATCH 改勾选状态；DELETE 删除。<name> 就是插件的文件名（如 notes.md）。"""
+    """GET 看详情（带文件全文）；DELETE 删除。<name> 就是插件的文件名（如 notes.md）。"""
 
     def get(self, request, session_id, name):
         session = get_own_session(request, session_id)
@@ -197,16 +196,6 @@ class PluginDetailView(APIView):
             return Response(PluginDetailSerializer(services.get_plugin(session, name)).data)
         except services.PluginError as e:
             return plugin_error(e)
-
-    def patch(self, request, session_id, name):
-        session = get_own_session(request, session_id)
-        serializer = PluginUpdateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            plugin = services.set_plugin_enabled(session, name, serializer.validated_data["enabled"])
-        except services.PluginError as e:
-            return plugin_error(e)
-        return Response(PluginSerializer(plugin).data)
 
     def delete(self, request, session_id, name):
         session = get_own_session(request, session_id)
@@ -239,7 +228,7 @@ class WorkflowListView(APIView):
 
 
 class WorkflowDetailView(APIView):
-    """GET 看详情（带文件全文）；PATCH 改勾选状态；DELETE 删除。<name> 就是工作流的文件名（如 flow.md）。"""
+    """GET 看详情（带文件全文）；DELETE 删除。<name> 就是工作流的文件名（如 flow.md）。"""
 
     def get(self, request, session_id, name):
         session = get_own_session(request, session_id)
@@ -247,16 +236,6 @@ class WorkflowDetailView(APIView):
             return Response(PluginDetailSerializer(workflows.get_workflow(session, name)).data)
         except services.PluginError as e:
             return plugin_error(e)
-
-    def patch(self, request, session_id, name):
-        session = get_own_session(request, session_id)
-        serializer = PluginUpdateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            workflow = workflows.set_workflow_enabled(session, name, serializer.validated_data["enabled"])
-        except services.PluginError as e:
-            return plugin_error(e)
-        return Response(PluginSerializer(workflow).data)
 
     def delete(self, request, session_id, name):
         session = get_own_session(request, session_id)

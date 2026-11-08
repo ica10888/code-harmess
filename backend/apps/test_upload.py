@@ -2,7 +2,6 @@
 
 import tempfile
 from pathlib import Path
-from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings

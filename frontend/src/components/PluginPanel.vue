@@ -1,12 +1,12 @@
 <script setup>
-// 页面最右侧的插件框（也用来做它下方的工作流框：kind="workflow"，逻辑相同，只是文案和接口不同，且上传不检查 frontmatter）：竖向复选框列表，每个框对应一个插件（skill）；下方两个按钮：增加、删除。
+// 页面最右侧的插件框（也用来做它下方的工作流框：kind="workflow"，逻辑相同，只是文案和接口不同，且上传不检查 frontmatter）：竖向列表，每一行是一个插件（skill）；下方一个按钮：增加。
 // 插件属于「当前会话」：后端把它们存在这个会话自己的目录里，切换会话就换一份列表。
-//   勾选 / 取消勾选：立即保存到后端。
+//   没有勾选：用不用、用哪个插件，由后端 core 的 skill_selector 在每句话之前选，这里只管文件的增删查。
 //   增加：选一个 .md 文件上传，文件名就是插件名。文件开头必须有 frontmatter（name + description）：
-//   勾选后后端要读它，把全文注入对话。选好后先在浏览器里检查，不合格就提示，不会白传。
-//   删除：删除当前「已勾选」的插件（先二次确认）。默认插件（后端 config.ini 配置的目录里的）所有会话都有、不能删除，
-//   可以勾选但不会被删除，旁边带「默认」标记。
-import { computed, ref, watch } from 'vue'
+//   选择器要读它。选好后先在浏览器里检查，不合格就提示，不会白传。
+//   查看：点名称弹窗看全文。
+//   删除：每行右边的「删除」（先二次确认）。默认插件（后端 config.ini 配置的目录里的）所有会话都有、不能删除，旁边带「默认」标记。
+import { ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   addPlugin,
@@ -17,17 +17,13 @@ import {
   getWorkflow,
   listPlugins,
   listWorkflows,
-  setPluginEnabled,
-  setWorkflowEnabled,
 } from '../api'
 import {
   checkSkillContent,
   checkSkillFile,
-  deletablePlugins,
   pluginErrorMessage,
   readHead,
   removeByName,
-  replaceByName,
 } from '../utils/plugins'
 
 // 当前会话的 id；还没有会话时是 null，插件框显示为空、按钮不可点
@@ -40,22 +36,12 @@ const props = defineProps({
 const isWorkflow = props.kind === 'workflow'
 const noun = isWorkflow ? '工作流' : '插件'
 const api = isWorkflow
-  ? { list: listWorkflows, get: getWorkflow, add: addWorkflow, setEnabled: setWorkflowEnabled, remove: deleteWorkflow }
-  : { list: listPlugins, get: getPlugin, add: addPlugin, setEnabled: setPluginEnabled, remove: deletePlugin }
+  ? { list: listWorkflows, get: getWorkflow, add: addWorkflow, remove: deleteWorkflow }
+  : { list: listPlugins, get: getPlugin, add: addPlugin, remove: deletePlugin }
 
 const plugins = ref([])
 const loading = ref(false)
-// 已勾选的数量变了就告诉父组件：聊天页据此判断「没写文字但勾了插件」时能不能发送
-const emit = defineEmits(['checked', 'toggled'])
-watch(
-  plugins,
-  (list) => emit('checked', list.filter((p) => p.enabled).length),
-  { deep: true },
-)
-const busy = ref(false) // 增加 / 删除进行中，期间按钮和复选框都不可点，免得并发操作
-
-// 删除按钮只看「已勾选且不是默认」的：默认插件勾了也不会被删
-const deletable = computed(() => deletablePlugins(plugins.value))
+const busy = ref(false) // 增加 / 删除进行中，期间按钮都不可点，免得并发操作
 
 // 会话变了就重新加载。快速连续切换时，先发出的请求可能后返回：只认「最后一次切换」对应的结果
 let loadToken = 0
@@ -77,23 +63,6 @@ watch(
   },
   { immediate: true },
 )
-
-// 点复选框：先问后端，成功后才更新界面；失败时复选框自己弹回原状（因为我们用的是服务器返回的状态）
-async function toggle(plugin, enabled) {
-  busy.value = true
-  try {
-    const updated = await api.setEnabled(props.sessionId, plugin.name, enabled)
-    plugins.value = replaceByName(plugins.value, updated)
-    // 勾选工作流可能顺带勾上了同名插件（让插件框刷新）；后端有提醒（例如没有同名插件）就明确告诉用户
-    emit('toggled')
-    if (updated.notice) ElMessage({ type: 'warning', message: updated.notice, duration: 8000, showClose: true })
-    else if (isWorkflow && enabled) ElMessage.success('已启用，下一条消息起模型将按该格式输出')
-  } catch (err) {
-    ElMessage.error(pluginErrorMessage(err))
-  } finally {
-    busy.value = false
-  }
-}
 
 // el-upload 的 before-upload 返回 false：不走它自带的上传，由我们自己传，这样能复用检查和统一的错误提示
 async function onPick(file) {
@@ -137,31 +106,26 @@ async function view(plugin) {
   }
 }
 
-async function removeChecked() {
-  const targets = deletable.value
-  if (!targets.length) return
+async function remove(plugin) {
   try {
-    await ElMessageBox.confirm(
-      `确定删除已勾选的 ${targets.length} 个${noun}？\n${targets.map((p) => p.name).join('、')}`,
-      `删除${noun}`,
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-    )
+    await ElMessageBox.confirm(`确定删除${noun} ${plugin.name}？`, `删除${noun}`, {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
   } catch {
     return // 点了取消
   }
   busy.value = true
-  const failed = []
-  for (const plugin of targets) {
-    try {
-      await api.remove(props.sessionId, plugin.name)
-      plugins.value = removeByName(plugins.value, plugin.name) // 删成功一个就从列表拿掉一个，中途失败也不会和后端对不上
-    } catch (err) {
-      failed.push(`${plugin.name}：${pluginErrorMessage(err)}`)
-    }
+  try {
+    await api.remove(props.sessionId, plugin.name)
+    plugins.value = removeByName(plugins.value, plugin.name)
+    ElMessage.success(`已删除${noun} ${plugin.name}`)
+  } catch (err) {
+    ElMessage.error(pluginErrorMessage(err))
+  } finally {
+    busy.value = false
   }
-  busy.value = false
-  if (failed.length) ElMessage.error(`有 ${failed.length} 个删除失败：${failed.join('；')}`)
-  else ElMessage.success(`已删除 ${targets.length} 个${noun}`)
 }
 </script>
 
@@ -173,18 +137,11 @@ async function removeChecked() {
 
     <div v-loading="loading" class="list">
       <el-empty v-if="!loading && !plugins.length" :description="`这个会话还没有${noun}`" :image-size="60" />
-      <el-checkbox
-        v-for="p in plugins"
-        :key="p.name"
-        :model-value="p.enabled"
-        :disabled="busy"
-        class="item"
-        @change="(value) => toggle(p, value)"
-      >
-        <!-- .prevent.stop：点名称只看内容，不触发复选框的勾选 -->
-        <span class="name" role="button" title="点击查看内容" @click.prevent.stop="view(p)">{{ p.name }}</span>
+      <div v-for="p in plugins" :key="p.name" class="item">
+        <span class="name" role="button" title="点击查看内容" @click="view(p)">{{ p.name }}</span>
         <el-tag v-if="p.default" size="small" type="info" class="tag" :title="`默认${noun}：所有会话都有，不能删除`">默认</el-tag>
-      </el-checkbox>
+        <el-button v-else link type="danger" size="small" class="del" :disabled="busy" @click="remove(p)">删除</el-button>
+      </div>
     </div>
 
     <div class="buttons">
@@ -199,7 +156,6 @@ async function removeChecked() {
       >
         <el-button :disabled="busy || !sessionId">增加</el-button>
       </el-upload>
-      <el-button type="danger" plain :disabled="busy || !deletable.length" @click="removeChecked">删除</el-button>
     </div>
 
     <el-dialog v-model="viewVisible" :title="viewing?.name" width="640px" append-to-body>
@@ -240,19 +196,12 @@ async function removeChecked() {
   min-height: 0;
   overflow-y: auto;
 }
-/* 竖向排列：每个复选框独占一行 */
+/* 竖向排列：每个插件独占一行，删除按钮在右边 */
 .item {
   display: flex;
-  align-items: flex-start;
-  height: auto;
+  align-items: center;
+  gap: 6px;
   margin: 0 0 8px;
-  white-space: normal;
-}
-.item :deep(.el-checkbox__label) {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.4;
 }
 .name {
   cursor: pointer;
@@ -264,8 +213,11 @@ async function removeChecked() {
   text-decoration: underline;
 }
 .tag {
-  align-self: flex-start;
-  margin-top: 2px;
+  flex: none;
+}
+.del {
+  flex: none;
+  margin-left: auto;
 }
 .buttons {
   display: flex;

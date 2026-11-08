@@ -1,7 +1,6 @@
 """工作流管理：规则和插件（services.py 的「插件管理」）完全一样，只是换了目录，并且上传的 frontmatter 要有 name、description、schema。
 
   <存储路径>/input/<会话id>/workflow/<文件名>.md   一个工作流：原样存放，文件名就是工作流名
-  <存储路径>/input/<会话id>/workflow/state.json    哪些工作流被勾选：{"<文件名>": true}
   config.ini 的 [storage] default_workflow_dir      默认工作流：所有会话可见、只读、不能删除（403）、同名上传 409
 
 文件名检查、错误类型、目录列举都直接复用 services 里插件的那一份。
@@ -20,16 +19,7 @@ from . import harness
 from .models import ChatSession
 from .services import PluginError, _md_names, plugin_name
 
-STATE_FILE = "state.json"
 _NAME = re.compile(r"[a-z0-9]+(-[a-z0-9]+)*")  # 和 skill 的 name 规则一致：小写字母、数字、单个连字符
-
-
-def apply_to_core(action: str, session: ChatSession, workflow: dict) -> None:
-    """把工作流的变化交给 core。action 是 "created" / "updated" / "deleted"；workflow 是 {"name", "enabled"}。
-
-    现阶段是空方法：工作流还没有实现，这里只留好位置，不碰 core。
-    以后在这里让 core 加载或移除这个工作流（文件在 harness.workflow_dir(session) 里），接口和文件存储都不用动。
-    """
 
 
 def _root(session: ChatSession) -> Path:
@@ -64,42 +54,25 @@ def _workflow_path(session: ChatSession, name: str) -> Path:
     return _root(session) / name
 
 
-def _read_state(session: ChatSession) -> dict:
-    """读勾选状态；文件不存在、内容坏了都当作「全都没勾」，不报错。"""
-    try:
-        data = json.loads((_root(session) / STATE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in data.items() if isinstance(v, bool)} if isinstance(data, dict) else {}
-
-
-def _write_state(session: ChatSession, state: dict) -> None:
-    root = _root(session)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def _workflow(name: str, state: dict, default: bool = False) -> dict:
-    return {"name": name, "enabled": state.get(name, False), "default": default}
+def _workflow(name: str, default: bool = False) -> dict:
+    return {"name": name, "default": default}
 
 
 def list_workflows(session: ChatSession) -> list[dict]:
     """这个会话能看到的工作流：先是默认的，再是会话自己的；各自按名称排序。"""
-    state = _read_state(session)
-    defaults = [_workflow(n, state, default=True) for n in _default_names()]
-    return defaults + [_workflow(n, state) for n in _md_names(_root(session))]
+    defaults = [_workflow(n, default=True) for n in _default_names()]
+    return defaults + [_workflow(n) for n in _md_names(_root(session))]
 
 
 def get_workflow(session: ChatSession, name: str) -> dict:
     """详情：多一个 content（文件全文）。文件不是 UTF-8 时解不了的字节用 � 代替，不会崩。"""
-    state = _read_state(session)
     default = _default_path(name)
     if default is not None:
-        return {**_workflow(default.name, state, default=True), "content": default.read_bytes().decode("utf-8", errors="replace")}
+        return {**_workflow(default.name, default=True), "content": default.read_bytes().decode("utf-8", errors="replace")}
     path = _workflow_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到工作流 {name}", status=404)
-    return {**_workflow(name, state), "content": path.read_bytes().decode("utf-8", errors="replace")}
+    return {**_workflow(name), "content": path.read_bytes().decode("utf-8", errors="replace")}
 
 
 def _check_frontmatter(raw: bytes) -> None:
@@ -121,7 +94,7 @@ def _check_frontmatter(raw: bytes) -> None:
 
 
 def create_workflow(session: ChatSession, uploaded) -> dict:
-    """上传一个 .md 文件（校验 frontmatter）：原样存成 workflow/<文件名>，默认不勾选。大小上限和文件上传共用（max_upload_mb）。"""
+    """上传一个 .md 文件（校验 frontmatter）：原样存成 workflow/<文件名>。大小上限和文件上传共用（max_upload_mb）。"""
     name = plugin_name(uploaded.name or "")
     if _default_path(name) is not None:
         raise PluginError(f"已经有叫 {name} 的默认工作流，请换一个文件名", status=409)
@@ -136,12 +109,7 @@ def create_workflow(session: ChatSession, uploaded) -> dict:
             f.write(raw)
     except FileExistsError:
         raise PluginError(f"已经有叫 {name} 的工作流，请先删除再上传", status=409) from None
-    state = _read_state(session)
-    if state.pop(name, None) is not None:  # 以前同名工作流留下的勾选状态不能带到新的上面
-        _write_state(session, state)
-    workflow = _workflow(name, state)
-    apply_to_core("created", session, workflow)
-    return workflow
+    return _workflow(name)
 
 
 def _file_of(session: ChatSession, filename: str) -> Path:
@@ -175,111 +143,46 @@ def _schema_problem(path: Path) -> str | None:
     return None
 
 
-def _checked_files(session: ChatSession) -> list[str]:
-    """state.json 里勾选的工作流文件名（不管文件还在不在）。"""
-    return [f for f, on in _read_state(session).items() if on]
-
-
-def checked_workflow(session: ChatSession) -> dict | None:
-    """勾选的、并且能用的那个工作流 {"file": 文件名, "name": frontmatter 的 name, "path": 路径}；没勾或不能用就是 None。
-
-    同时只能勾一个，所以只返回一个。文件被删、schema 坏了的不算能用（原因见 checked_problem）。
-    """
-    for filename in _checked_files(session):
-        path = _file_of(session, filename)
-        if path.is_file() and _schema_problem(path) is None:
-            return {"file": filename, "name": _frontmatter_name(path), "path": path}
-    return None
-
-
-def checked_problem(session: ChatSession) -> str | None:
-    """勾选了工作流却用不了（文件被删、schema 坏了）时，给用户看的一句话；一切正常或没勾就是 None。"""
-    for filename in _checked_files(session):
-        path = _file_of(session, filename)
-        if not path.is_file():
-            return f"已勾选的工作流 {filename} 的文件已不存在，模型收不到它的输出格式。请取消勾选或重新上传。"
-        problem = _schema_problem(path)
-        if problem:
-            return f"已勾选的工作流 {filename} 不能用：{problem}，模型收不到它的输出格式。请修改后重新上传。"
-    return None
-
-
-def workflow_message(session: ChatSession, already: str) -> str | None:
-    """勾选的工作流合成一条要注入的消息：全文 + 输出要求。already 是对话里已有的用户消息文字，已经注入过就不再注入。"""
-    checked = checked_workflow(session)
-    if checked is None or f'<workflow name="{checked["name"]}">' in already:
-        return None
-    body = checked["path"].read_bytes().decode("utf-8", errors="replace")
-    return (
-        "The user enabled the workflow below for this conversation. Its frontmatter contains the JSON Schema "
-        "of the result, so the schema IS available: do not say it is missing. When the user asks for what the "
-        f"plugin named {checked['name']} does and gives the input it needs, reply with exactly one JSON value "
-        "that validates against that schema, inside a ```json fenced block, with no other explanation. If the "
-        "input is missing (for example no code to review), ask the user for it instead of refusing or inventing "
-        "anything.\n\n"
-        f'<workflow name="{checked["name"]}">\n{body}\n</workflow>'
-    )
-
-
-def set_workflow_enabled(session: ChatSession, name: str, enabled: bool) -> dict:
-    """勾选 / 取消勾选。默认工作流也可以勾选，状态记在这个会话自己的 state.json 里。
-
-    同时只能勾一个（已经勾了别的就 409）。勾选时自动勾上同名（frontmatter name 相同）的插件；
-    找不到同名插件、或工作流文件有问题时，勾选照样成功，返回里带 notice 告诉用户。取消勾选不动插件。
-    """
-    from . import services  # 同 harness：避免循环导入
-
-    default = _default_path(name)
-    if default is not None:
-        name, is_default = default.name, True
-    else:
-        if not _workflow_path(session, name).is_file():
-            raise PluginError(f"找不到工作流 {name}", status=404)
-        is_default = False
-    state = _read_state(session)
-    if enabled:
-        other = next((f for f in [*_default_names(), *_md_names(_root(session))] if f != name and state.get(f)), None)
-        if other:
-            raise PluginError(f"同时只能勾选一个工作流，请先取消勾选 {other}", status=409)
-    state[name] = enabled
-    _write_state(session, state)
-    workflow = _workflow(name, state, default=is_default)
-    apply_to_core("updated", session, workflow)
-    if enabled:
-        notice = _enable_same_named_plugin(session, name, services)
-        if notice:
-            workflow["notice"] = notice
-    return workflow
-
-
-def _enable_same_named_plugin(session: ChatSession, filename: str, services) -> str | None:
-    """勾选工作流后自动勾选同名插件；返回要提醒用户的话，一切正常就是 None。"""
-    problem = _schema_problem(_file_of(session, filename))
-    if problem:
-        return f"工作流 {filename} 有问题：{problem}（需要 name、description、schema），模型收不到它的输出格式。"
-    skill_name = _frontmatter_name(_file_of(session, filename))
-    plugin = services.find_plugin_file(session, skill_name)
-    if plugin is None:
-        return f"没有找到名为 {skill_name} 的插件：模型会按工作流的格式输出，但缺少具体的处理说明。建议上传 name 为 {skill_name} 的插件。"
-    for other in services.list_plugins(session):  # 只留同名插件：其他勾选的都取消，避免无关插件一起注入
-        if other["enabled"] and other["name"] != plugin:
-            services.set_plugin_enabled(session, other["name"], False)
-    services.set_plugin_enabled(session, plugin, True)
-    return None
-
-
 def delete_workflow(session: ChatSession, name: str) -> None:
     if _default_path(name) is not None:
         raise PluginError(f"{name} 是默认工作流，不能删除", status=403)
     path = _workflow_path(session, name)
     if not path.is_file():
         raise PluginError(f"找不到工作流 {name}", status=404)
-    state = _read_state(session)
-    workflow = _workflow(name, state)
     path.unlink()
-    if state.pop(name, None) is not None:
-        _write_state(session, state)
-    apply_to_core("deleted", session, workflow)
+
+
+def workflow_for(session: ChatSession, skill_name: str) -> dict | None:
+    """frontmatter 的 name 等于 skill_name、并且能用的工作流 {"file", "name", "path"}（默认的在前）；没有就是 None。
+
+    工作流跟着 skill_selector 选中的 skill 走：同名就是它的输出格式。schema 坏了的不算能用。
+    """
+    for filename in [*_default_names(), *_md_names(_root(session))]:
+        path = _file_of(session, filename)
+        if path.is_file() and _frontmatter_name(path) == skill_name and _schema_problem(path) is None:
+            return {"file": filename, "name": skill_name, "path": path}
+    return None
+
+
+def workflow_message(session: ChatSession, skill_names: list[str], already: str) -> str | None:
+    """选中的 skill 里有同名工作流的，合成一条要注入的消息：全文 + 输出要求。already 是对话里已有的用户消息文字，已经注入过的不再注入。"""
+    blocks = []
+    for skill_name in skill_names:
+        found = workflow_for(session, skill_name)
+        if found is None or f'<workflow name="{skill_name}">' in already:
+            continue
+        body = found["path"].read_bytes().decode("utf-8", errors="replace")
+        blocks.append(f'<workflow name="{skill_name}">\n{body}\n</workflow>')
+    if not blocks:
+        return None
+    return (
+        "The workflow(s) below belong to the skill(s) selected for this request. Each frontmatter contains the "
+        "JSON Schema of the result, so the schema IS available: do not say it is missing. When the user asks for "
+        "what the skill does and gives the input it needs, reply with exactly one JSON value that validates "
+        "against that schema, inside a ```json fenced block, with no other explanation. If the input is missing "
+        "(for example no code to review), ask the user for it instead of refusing or inventing anything.\n\n"
+        + "\n\n".join(blocks)
+    )
 
 
 # --- eureka 时刻 ---------------------------------------------------------------------

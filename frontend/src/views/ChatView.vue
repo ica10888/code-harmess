@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
 import FileChangeBanner from '../components/FileChangeBanner.vue'
+import SkillSelectionBanner from '../components/SkillSelectionBanner.vue'
 import EurekaRunPanel from '../components/EurekaRunPanel.vue'
 import FileUploadButton from '../components/FileUploadButton.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
@@ -23,11 +24,18 @@ const pendingFile = ref(null) // 已选好、还没上传的文件；点「发�
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
-const pluginReload = ref(0) // 勾选工作流可能自动勾上同名插件：加一，让插件框重新加载
-const checkedPlugins = ref(0) // 当前会话已勾选的插件数；勾了插件即使不写文字也能发送
-// 没写文字、但上传了文件或勾了插件时，用这句话代替，让模型照着去做
-const DEFAULT_TEXT = '请根据我上传的文件和勾选的插件开始。'
-const rightCollapsed = ref(false) // 右栏（插件 + 工作流）是否收起
+// 没写文字、但上传了文件时，用这句话代替，让模型照着去做
+const DEFAULT_TEXT = '请根据我上传的文件开始。'
+const rightCollapsed = ref(false) // 右栏（插件 + 工作流）是否收起（宽屏用）
+// 窄屏（手机）一次只显示一个页面，由左右各两个悬浮按钮切换；宽屏不用这个状态
+const LEFT_FABS = [
+  { view: 'sessions', icon: '☰', title: '会话列表' },
+  { view: 'chat', icon: '💬', title: '对话' },
+]
+const RIGHT_FABS = [
+  { view: 'plugins', icon: '🧩', title: '插件和工作流' },
+]
+const view = ref('chat') // sessions | chat | plugins（插件和工作流合在一页）
 const listEl = ref(null)
 
 let closeStream = null
@@ -67,11 +75,18 @@ async function newSession() {
   await selectSession(created.id)
 }
 
+// 回车发送；Shift+回车走默认行为换行；输入法选字时的回车不发送
+function onEnter(e) {
+  if (e.isComposing) return
+  e.preventDefault()
+  send()
+}
+
 async function send() {
   const attachment = pendingFile.value
-  const content = draft.value.trim() || (attachment || checkedPlugins.value ? DEFAULT_TEXT : '')
+  const content = draft.value.trim() || (attachment ? DEFAULT_TEXT : '')
   const options = buildSendOptions(modelChoice.value) // 点发送这一刻的选择，随这句话一起透传给后端
-  // 有文件或勾了插件时，没有文字也能发；什么都没有就不动
+  // 有文件时，没有文字也能发；什么都没有就不动
   if (!content || !currentId.value || sending.value) return
   sending.value = true
   try {
@@ -170,7 +185,7 @@ onBeforeUnmount(() => closeStream && closeStream())
 </script>
 
 <template>
-  <div class="chat">
+  <div class="chat" :data-view="view">
     <aside class="sidebar">
       <el-button type="primary" class="new" @click="newSession">新建会话</el-button>
       <div
@@ -178,12 +193,40 @@ onBeforeUnmount(() => closeStream && closeStream())
         :key="s.id"
         class="session"
         :class="{ active: s.id === currentId }"
-        @click="selectSession(s.id)"
+        @click="selectSession(s.id); view = 'chat'"
       >
         {{ s.title }}
         <span class="time">{{ new Date(s.created_at).toLocaleString() }}</span>
       </div>
     </aside>
+
+    <!-- 窄屏专用：左右各两个悬浮按钮，一次只显示一个页面（左：会话 / 对话；右：插件 / 工作流） -->
+    <div class="fabs left">
+      <el-button
+        v-for="f in LEFT_FABS"
+        :key="f.view"
+        circle
+        class="fab"
+        :type="view === f.view ? 'primary' : 'default'"
+        :title="f.title"
+        @click="view = f.view"
+      >
+        {{ f.icon }}
+      </el-button>
+    </div>
+    <div class="fabs right">
+      <el-button
+        v-for="f in RIGHT_FABS"
+        :key="f.view"
+        circle
+        class="fab"
+        :type="view === f.view ? 'primary' : 'default'"
+        :title="f.title"
+        @click="view = f.view"
+      >
+        {{ f.icon }}
+      </el-button>
+    </div>
 
     <main class="main">
       <div ref="listEl" class="messages">
@@ -193,6 +236,13 @@ onBeforeUnmount(() => closeStream && closeStream())
           <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
           <EurekaBanner v-if="m.eureka" :text="m.eureka.text" />
           <!-- 文件变更：这一轮工作区有文件创建或变更；和 eureka 提示条一样，刷新后由后端带回来 -->
+          <!-- 选中 skill：skill_selector 这一轮选中了插件/工作流；和文件变更提示条一样，刷新后由后端带回来 -->
+          <SkillSelectionBanner
+            v-if="m.skill_selection"
+            :text="m.skill_selection.text"
+            :plugins="m.skill_selection.plugins"
+            :workflows="m.skill_selection.workflows"
+          />
           <FileChangeBanner v-if="m.file_change && currentId" :session-id="currentId" :text="m.file_change.text" :files="m.file_change.files" />
           <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
           <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
@@ -214,8 +264,8 @@ onBeforeUnmount(() => closeStream && closeStream())
           type="textarea"
           :rows="3"
           resize="none"
-          placeholder="支持 Markdown，Ctrl+Enter 发送"
-          @keydown.ctrl.enter.prevent="send"
+          placeholder="支持 Markdown，Enter 发送，Shift+Enter 换行"
+          @keydown.enter.exact="onEnter"
         />
         <!-- 文本框下方一排：左边选文件；右边依次是模型、推理强度、发送，三者垂直居中对齐 -->
         <div class="actions">
@@ -225,7 +275,7 @@ onBeforeUnmount(() => closeStream && closeStream())
             <el-button
               type="primary"
               :loading="sending"
-              :disabled="!draft.trim() && !pendingFile && !checkedPlugins"
+              :disabled="!draft.trim() && !pendingFile"
               @click="send"
             >
               {{ stage || '发送' }}
@@ -244,11 +294,11 @@ onBeforeUnmount(() => closeStream && closeStream())
         :title="rightCollapsed ? '展开插件和工作流' : '收起插件和工作流'"
         @click="rightCollapsed = !rightCollapsed"
       >
-        {{ rightCollapsed ? '‹' : '›' }}
+        {{ rightCollapsed ? '‹' : '×' }}
       </el-button>
       <div v-show="!rightCollapsed" class="panels">
-        <PluginPanel :key="pluginReload" :session-id="currentId" @checked="(n) => (checkedPlugins = n)" />
-        <PluginPanel :session-id="currentId" kind="workflow" @toggled="pluginReload++" />
+        <PluginPanel :session-id="currentId" />
+        <PluginPanel :session-id="currentId" kind="workflow" />
       </div>
     </aside>
   </div>
@@ -258,6 +308,9 @@ onBeforeUnmount(() => closeStream && closeStream())
 .chat {
   display: flex;
   height: 100%;
+}
+.fabs {
+  display: none; /* 只在窄屏显示 */
 }
 .side-panels {
   position: relative;
@@ -385,5 +438,65 @@ onBeforeUnmount(() => closeStream && closeStream())
   align-items: center;
   gap: 16px;
   min-width: 0;
+}
+/* 窄屏（手机 390px）：三栏改为上下堆叠，聊天区占剩余高度，不再被两侧栏挤没 */
+@media (max-width: 768px) {
+  /* 一次只显示一个页面（由 data-view 决定），左右各两个悬浮按钮切换 */
+  .chat {
+    position: relative;
+  }
+  .fabs {
+    position: absolute;
+    top: 8px;
+    z-index: 30;
+    display: flex;
+    gap: 8px;
+  }
+  .fabs.left {
+    left: 8px;
+  }
+  .fabs.right {
+    right: 8px;
+  }
+  .fab {
+    width: 44px;
+    height: 44px;
+    margin: 0;
+    font-size: 20px;
+  }
+  .sidebar,
+  .main,
+  .side-panels {
+    display: none;
+    flex: 1;
+    width: auto;
+    min-height: 0;
+    border: none;
+    margin-top: 64px; /* 给悬浮按钮让位；用 margin 而不是 padding，滚动条才从按钮下面开始 */
+    box-sizing: border-box;
+    overflow-y: auto;
+  }
+  .chat[data-view='sessions'] .sidebar,
+  .chat[data-view='chat'] .main,
+  .chat[data-view='plugins'] .side-panels {
+    display: flex;
+    flex-direction: column;
+  }
+  .toggle {
+    display: none; /* 窄屏不用右栏的收起按钮 */
+  }
+  .panels,
+  .collapsed .panels {
+    display: flex !important; /* 窄屏右栏始终展开 */
+  }
+  .bubble,
+  .notice {
+    max-width: 90%;
+  }
+  .composer .actions,
+  .composer .actions .right {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 }
 </style>

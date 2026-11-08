@@ -25,10 +25,12 @@ class MessageSerializer(serializers.ModelSerializer):
     notice = serializers.SerializerMethodField()  # 给用户看的提示，没有就是 null
     # 这一轮工作区有文件创建或变更就带上 {"text", "files"}，没有就是 null；同样只是展示用的
     file_change = serializers.SerializerMethodField()
+    # 这一轮 skill_selector 选中了 skill 就带上 {"text", "plugins", "workflows"}，没有就是 null；同样只是展示用的
+    skill_selection = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
-        fields = ["id", "role", "content", "created_at", "eureka", "notice", "file_change"]
+        fields = ["id", "role", "content", "created_at", "eureka", "notice", "file_change", "skill_selection"]
         read_only_fields = fields
 
     def get_notice(self, message):
@@ -37,6 +39,12 @@ class MessageSerializer(serializers.ModelSerializer):
     def get_file_change(self, message):
         change = getattr(message, "file_change", None)
         return {"text": change.text, "files": change.files} if change else None
+
+    def get_skill_selection(self, message):
+        selection = getattr(message, "skill_selection", None)
+        if not selection:
+            return None
+        return {"text": selection.text, "plugins": selection.plugins, "workflows": selection.workflows}
 
     def get_eureka(self, message):
         eureka = getattr(message, "eureka", None)  # 反向一对一：没有就是 None（这里不会触发额外查询报错）
@@ -58,19 +66,11 @@ class PluginSerializer(serializers.Serializer):
     """插件（列表用）：不带文件内容。名称就是文件名。"""
 
     name = serializers.CharField(read_only=True)
-    enabled = serializers.BooleanField()
     default = serializers.BooleanField(read_only=True)  # 默认插件：所有会话都有，不能删除
-    notice = serializers.CharField(read_only=True, required=False)  # 勾选后的提醒（例如工作流没有同名插件）；没有就不出现
 
 
 class PluginDetailSerializer(PluginSerializer):
     content = serializers.CharField(read_only=True)  # 文件全文
-
-
-class PluginUpdateSerializer(serializers.Serializer):
-    """PATCH 请求体：只能改勾选状态，名称和内容不能改（要改就删了重新上传）。"""
-
-    enabled = serializers.BooleanField()
 
 
 class WebhookLogSerializer(serializers.Serializer):

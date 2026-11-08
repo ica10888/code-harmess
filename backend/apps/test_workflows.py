@@ -2,7 +2,6 @@
 
 import tempfile
 from pathlib import Path
-from unittest import mock
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
@@ -42,9 +41,9 @@ class WorkflowApiTests(TestCase):
         res = self.upload()
 
         assert res.status_code == 201
-        assert res.json() == {"name": "flow.md", "enabled": False, "default": False}
+        assert res.json() == {"name": "flow.md", "default": False}
         assert (self.dir / "flow.md").read_text(encoding="utf-8") == VALID
-        assert self.client.get(self.base).json() == [{"name": "flow.md", "enabled": False, "default": False}]
+        assert self.client.get(self.base).json() == [{"name": "flow.md", "default": False}]
 
     def test_detail_returns_full_content_for_own_and_default(self):
         self.upload()
@@ -78,21 +77,18 @@ class WorkflowApiTests(TestCase):
         self.upload()
         assert self.upload().status_code == 409
 
-    def test_toggle_and_delete(self):
+    def test_delete(self):
         self.upload()
         url = f"{self.base}flow.md/"
 
-        assert self.client.patch(url, {"enabled": True}, format="json").json()["enabled"] is True
-        assert self.client.get(self.base).json()[0]["enabled"] is True
         assert self.client.delete(url).status_code == 204
         assert self.client.get(self.base).json() == []
 
-    def test_default_workflow_is_listed_checkable_but_not_deletable_or_overridable(self):
+    def test_default_workflow_is_listed_but_not_deletable_or_overridable(self):
         (self.default_dir / "base.md").write_text("# 默认", encoding="utf-8")
 
-        assert self.client.get(self.base).json() == [{"name": "base.md", "enabled": False, "default": True}]
+        assert self.client.get(self.base).json() == [{"name": "base.md", "default": True}]
         url = f"{self.base}base.md/"
-        assert self.client.patch(url, {"enabled": True}, format="json").json()["enabled"] is True
         assert self.client.delete(url).status_code == 403
         assert self.upload(md("base.md")).status_code == 409
 
@@ -103,11 +99,3 @@ class WorkflowApiTests(TestCase):
             with self.assertRaises(PluginError) as e:
                 workflows.delete_workflow(session, evil)
             assert e.exception.status == 404, evil
-
-    def test_changes_are_handed_to_core_hook(self):
-        with mock.patch.object(workflows, "apply_to_core") as hook:
-            self.upload()
-            self.client.patch(f"{self.base}flow.md/", {"enabled": True}, format="json")
-            self.client.delete(f"{self.base}flow.md/")
-
-        assert [c.args[0] for c in hook.call_args_list] == ["created", "updated", "deleted"]

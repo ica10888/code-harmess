@@ -48,6 +48,19 @@ class FileChange(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
 
+class SkillSelection(models.Model):
+    """选中 skill 的提示：skill_selector 这一轮选中了 skill，就挂在那条 assistant 消息上的一条提示（和 FileChange 同一套逻辑）。
+
+    单独一张表，不进模型上下文。text 存当时展示的文本；plugins 是选中的 skill 名，workflows 是其中有同名工作流的那些。
+    """
+
+    message = models.OneToOneField(Message, on_delete=models.CASCADE, related_name="skill_selection")  # 一条消息最多一个
+    text = models.TextField()
+    plugins = models.JSONField(default=list)
+    workflows = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
 class Eureka(models.Model):
     """eureka 时刻：用了插件、且这条回复通过了同名工作流的 schema 时，挂在那条 assistant 消息上的一条提示。
 

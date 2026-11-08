@@ -13,10 +13,10 @@ from unittest import mock
 from django.test import TestCase, TransactionTestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps import harness, workflow_runtime, workflows
+from apps import harness, workflow_runtime
 from apps.models import ChatSession, Eureka, Message, StageLog, StageRun, WorkflowRun
 from apps.test_eureka import PLUGIN, RecordingProvider
-from apps.test_harness import text
+from apps.test_harness import picks, text
 from apps.workflows_run import run_token
 
 ORIGINAL_MODELS = "import hashlib\nclass User:\n    password = None\n"
@@ -63,9 +63,7 @@ class BaseMixin:
         self.addCleanup(workflow_runtime.reset)
         self.client = APIClient()
         self.sid = self.client.post("/api/sessions/", {}, format="json").json()["id"]
-        from urllib.parse import quote
-
-        self.client.patch(f"/api/sessions/{self.sid}/plugins/{quote('代码审查.md')}/", {"enabled": True}, format="json")
+        self.picked = ["code-review"]  # 没有勾选了：每次 send 时，skill_selector 那次请求里模型选这个
         self.put_original()  # 默认：用户上传过被审查的 models.py（要在会话创建之后：工作区是按会话 id 分的）
 
     def _patch_langchain(self):
@@ -94,7 +92,7 @@ class BaseMixin:
         # TransactionTestCase 的事务是真提交的，回调直接就执行了，用不着它（也没有这个方法）。
         capture = getattr(self, "captureOnCommitCallbacks", None)
         with capture(execute=True) if capture else contextlib.nullcontext():
-            with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(reply))):
+            with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(picks(*self.picked), text(reply))):
                 res = self.client.post(f"/api/sessions/{self.sid}/messages/", {"content": content}, format="json")
         assert res.status_code == 201, res.content
         return res.json()
@@ -247,15 +245,12 @@ class ExecutionTests(ThreadedBase):
         self.send()
         first = WorkflowRun.objects.get()
         other_sid = self.client.post("/api/sessions/", {}, format="json").json()["id"]
-        from urllib.parse import quote
-
-        self.client.patch(f"/api/sessions/{other_sid}/plugins/{quote('代码审查.md')}/", {"enabled": True}, format="json")
         other_workspace = Path(harness.workspace_dir(ChatSession.objects.get(pk=other_sid)))
         other_workspace.mkdir(parents=True, exist_ok=True)  # 原文件是按会话放的：第二个会话也得有它自己的
         (other_workspace / "models.py").write_bytes(ORIGINAL_MODELS.encode("utf-8"))
         capture = getattr(self, "captureOnCommitCallbacks", None)
         with capture(execute=True) if capture else contextlib.nullcontext():
-            with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(text(SUGGESTIONS))):
+            with mock.patch("apps.harness.get_provider", return_value=RecordingProvider(picks("code-review"), text(SUGGESTIONS))):
                 self.client.post(f"/api/sessions/{other_sid}/messages/", {"content": "x"}, format="json")
 
         self.drain()
@@ -507,10 +502,7 @@ class AnalyzeConfigWorkflowTests(ThreadedBase):
         base = Path(__file__).resolve().parent.parent
         (self.skills / "分析配置文件.md").write_bytes((base / "default_skills" / "分析配置文件.md").read_bytes())
         (self.flows / "分析配置文件.md").write_bytes((base / "default_workflow" / "分析配置文件.md").read_bytes())
-        from urllib.parse import quote
-
-        self.client.patch(f"/api/sessions/{self.sid}/plugins/{quote('代码审查.md')}/", {"enabled": False}, format="json")
-        self.client.patch(f"/api/sessions/{self.sid}/plugins/{quote('分析配置文件.md')}/", {"enabled": True}, format="json")
+        self.picked = ["analyze-config"]
         self.settings_override = override_settings(EUREKA_PLUGINS="code_review, analyze_config")
         self.settings_override.enable()
         self.addCleanup(self.settings_override.disable)

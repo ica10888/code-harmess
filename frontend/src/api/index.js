@@ -83,8 +83,6 @@ export const addPlugin = (sessionId, file) => {
   return http.post(`/sessions/${sessionId}/plugins/`, form).then((r) => r.data)
 }
 /** 勾选 / 取消勾选，返回更新后的插件。name 是插件名称（后端的目录名）。 */
-export const setPluginEnabled = (sessionId, name, enabled) =>
-  http.patch(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
 export const deletePlugin = (sessionId, name) =>
   http.delete(`/sessions/${sessionId}/plugins/${encodeURIComponent(name)}/`)
 
@@ -100,8 +98,6 @@ export const addWorkflow = (sessionId, file) => {
   form.append('file', file)
   return http.post(`/sessions/${sessionId}/workflows/`, form).then((r) => r.data)
 }
-export const setWorkflowEnabled = (sessionId, name, enabled) =>
-  http.patch(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`, { enabled }).then((r) => r.data)
 export const deleteWorkflow = (sessionId, name) =>
   http.delete(`/sessions/${sessionId}/workflows/${encodeURIComponent(name)}/`)
 

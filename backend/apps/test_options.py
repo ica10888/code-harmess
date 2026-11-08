@@ -3,7 +3,6 @@
 枚举的值是写死的（取自 DeepSeek 官方文档，见 providers.MODELS / EFFORTS），前端只负责展示和选择。
 """
 
-import json
 import tempfile
 from unittest import mock
 
@@ -12,7 +11,7 @@ from rest_framework.test import APIClient
 
 from apps.models import ChatSession
 from apps.options import Effort, Model
-from apps.test_harness import FakeProvider, run, sse_events, text
+from apps.test_harness import FakeProvider, sse_events, text
 from providers import EFFORTS, MODELS
 
 
@@ -60,7 +59,7 @@ class SendOptionsTests(TestCase):
     def setUp(self):
         storage = tempfile.TemporaryDirectory()
         self.addCleanup(storage.cleanup)
-        override = override_settings(HARNESS_STORAGE_DIR=storage.name)
+        override = override_settings(HARNESS_STORAGE_DIR=storage.name, HARNESS_DEFAULT_SKILLS_DIR="")
         override.enable()
         self.addCleanup(override.disable)
         self.client = APIClient()
