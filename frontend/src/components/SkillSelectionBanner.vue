@@ -72,4 +72,9 @@ defineProps({
     animation: none;
   }
 }
+@media (max-width: 768px) {
+  .skill-selection {
+    max-width: 90%;
+  }
+}
 </style>

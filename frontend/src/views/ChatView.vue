@@ -583,6 +583,26 @@ onBeforeUnmount(() => closeStream && closeStream())
   .notice {
     max-width: 90%;
   }
+  /* 标签行：标签可横向滚动，会话下拉缩小；两侧内边距减小 */
+  .tabs {
+    padding: 0 8px;
+    gap: 8px;
+  }
+  .tab-switch {
+    flex: 1;
+    min-width: 0;
+  }
+  .session-select {
+    width: 120px;
+    flex-shrink: 0;
+  }
+  .messages {
+    padding: 12px;
+  }
+  /* 输入区贴底时避开 iPhone 底部横条 */
+  .composer {
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+  }
   /* 发送这一行保持在一行内，不换行 */
   .composer .actions,
   .composer .actions .right {

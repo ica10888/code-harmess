@@ -63,4 +63,9 @@ defineProps({
     animation: none;
   }
 }
+@media (max-width: 768px) {
+  .file-change {
+    max-width: 90%;
+  }
+}
 </style>

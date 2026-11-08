@@ -160,4 +160,9 @@ onBeforeUnmount(() => {
   margin: 6px 0;
   color: #909399;
 }
+@media (max-width: 768px) {
+  .run {
+    width: 90%;
+  }
+}
 </style>

@@ -160,6 +160,7 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
 
 <style scoped>
 .browser {
+  container-type: inline-size; /* 按自身宽度（而不是屏幕）适配窄框 */
   flex: 1;
   display: flex;
   min-height: 0;
@@ -218,7 +219,7 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
 .browser:focus {
   outline: none;
 }
-@media (max-width: 768px) {
+@container (max-width: 520px) {
   .browser {
     flex-direction: column;
   }

@@ -44,4 +44,9 @@ defineProps({ text: { type: String, required: true } })
     animation: none;
   }
 }
+@media (max-width: 768px) {
+  .eureka {
+    max-width: 90%;
+  }
+}
 </style>

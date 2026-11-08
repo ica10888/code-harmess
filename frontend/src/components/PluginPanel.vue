@@ -225,7 +225,7 @@ async function remove(plugin) {
       <el-button :disabled="busy || !sessionId" @click="openCreate">新建</el-button>
     </div>
 
-    <el-dialog v-model="viewVisible" :title="viewing?.name" width="640px" append-to-body>
+    <el-dialog v-model="viewVisible" :title="viewing?.name" width="min(640px, 94vw)" append-to-body>
       <el-input v-model="draft" type="textarea" :readonly="viewing?.default" :rows="18" resize="none" />
       <template v-if="!viewing?.default" #footer>
         <el-button @click="viewVisible = false">取消</el-button>
@@ -233,7 +233,7 @@ async function remove(plugin) {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="creating" :title="`新建${noun}`" width="640px" append-to-body>
+    <el-dialog v-model="creating" :title="`新建${noun}`" width="min(640px, 94vw)" append-to-body>
       <el-input v-model="newName" placeholder="文件名，如 notes.md" class="new-name" />
       <el-input v-model="newContent" type="textarea" :rows="14" resize="none" />
       <template #footer>

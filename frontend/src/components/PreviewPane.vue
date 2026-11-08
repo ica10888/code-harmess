@@ -97,6 +97,7 @@ function sandboxFor(link) {
 
 <style scoped>
 .preview-pane {
+  container-type: inline-size; /* 按自身宽度适配窄框 */
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -189,5 +190,17 @@ function sandboxFor(link) {
 }
 .tip {
   margin-top: 6px;
+}
+@container (max-width: 520px) {
+  .bar {
+    flex-wrap: wrap;
+  }
+  .url {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .btab {
+    max-width: 140px;
+  }
 }
 </style>
