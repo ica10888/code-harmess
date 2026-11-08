@@ -9,13 +9,21 @@ import WaitingHint from '../components/WaitingHint.vue'
 import SkillSelectionBanner from '../components/SkillSelectionBanner.vue'
 import ModelPicker from '../components/ModelPicker.vue'
 // 非首屏必需的组件异步加载：工作区（含代码编辑器）、预览、会话统计、进度面板、插件面板、输入预览、上传按钮
-const EurekaRunPanel = defineAsyncComponent(() => import('../components/EurekaRunPanel.vue'))
-const PreviewPane = defineAsyncComponent(() => import('../components/PreviewPane.vue'))
-const WorkspaceBrowser = defineAsyncComponent(() => import('../components/WorkspaceBrowser.vue'))
-const PluginPanel = defineAsyncComponent(() => import('../components/PluginPanel.vue'))
-const MarkdownPreview = defineAsyncComponent(() => import('../components/MarkdownPreview.vue'))
-const FileUploadButton = defineAsyncComponent(() => import('../components/FileUploadButton.vue'))
-const SessionStats = defineAsyncComponent(() => import('../components/SessionStats.vue'))
+const loadEurekaRunPanel = () => import('../components/EurekaRunPanel.vue')
+const EurekaRunPanel = defineAsyncComponent(loadEurekaRunPanel)
+const loadPreviewPane = () => import('../components/PreviewPane.vue')
+const PreviewPane = defineAsyncComponent(loadPreviewPane)
+const loadWorkspaceBrowser = () => import('../components/WorkspaceBrowser.vue')
+const WorkspaceBrowser = defineAsyncComponent(loadWorkspaceBrowser)
+const loadPluginPanel = () => import('../components/PluginPanel.vue')
+const PluginPanel = defineAsyncComponent(loadPluginPanel)
+const loadMarkdownPreview = () => import('../components/MarkdownPreview.vue')
+const MarkdownPreview = defineAsyncComponent(loadMarkdownPreview)
+const loadFileUploadButton = () => import('../components/FileUploadButton.vue')
+const FileUploadButton = defineAsyncComponent(loadFileUploadButton)
+const loadSessionStats = () => import('../components/SessionStats.vue')
+const SessionStats = defineAsyncComponent(loadSessionStats)
+import { prefetchWhenIdle } from '../utils/prefetch'
 import { loadLastSession, pickSession, saveLastSession } from '../utils/lastSession'
 import { extractLinks } from '../utils/eurekaRun'
 import { buildSendOptions } from '../utils/options'
@@ -242,6 +250,8 @@ async function streamReply(content, options) {
 }
 
 onMounted(async () => {
+  // 首屏之后，空闲时预取用户很可能点开的页面
+  prefetchWhenIdle([loadWorkspaceBrowser, loadPreviewPane, loadSessionStats, loadEurekaRunPanel])
   sessions.value = await listSessions()
   const id = pickSession(sessions.value, loadLastSession())
   if (id) await selectSession(id)
