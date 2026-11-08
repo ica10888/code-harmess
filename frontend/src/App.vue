@@ -1,5 +1,13 @@
+<script setup>
+import { NConfigProvider } from 'naive-ui'
+import { themeOverrides } from './utils/feedback'
+</script>
+
 <template>
-  <router-view />
+  <!-- abstract：不多包一层 div，保持 #app 的高度布局 -->
+  <n-config-provider abstract :theme-overrides="themeOverrides">
+    <router-view />
+  </n-config-provider>
 </template>
 
 <style>
@@ -18,11 +26,11 @@ body,
   #app {
     height: 100dvh;
   }
-  .el-input__inner,
-  .el-textarea__inner {
+  .n-input__input-el,
+  .n-input__textarea-el {
     font-size: 16px !important;
   }
-  .el-message {
+  .n-message {
     max-width: 92vw;
     min-width: 0 !important;
   }

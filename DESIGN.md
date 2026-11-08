@@ -21,7 +21,7 @@
 
 ```css
 /* 品牌色 */
---primary-color: #409EFF;        /* Element Plus 默认蓝色 */
+--primary-color: #409EFF;        /* 沿用原蓝色，通过 n-config-provider 的 themeOverrides 设置（Naive UI 默认是绿色） */
 --primary-light: #79BBFF;
 --primary-dark: #337ECC;
 
@@ -139,37 +139,32 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 
 ```vue
 <!-- 主要操作 -->
-<el-button type="primary" class="action-button">
+<n-button type="primary" class="action-button">
   确认
-</el-button>
+</n-button>
 
 <!-- 次要操作 -->
-<el-button>取消</el-button>
+<n-button>取消</n-button>
 
 <!-- 危险操作 -->
-<el-button type="danger">删除</el-button>
+<n-button type="error">删除</n-button>
 
 <!-- 管理员操作 -->
-<el-button type="warning">管理员操作</el-button>
+<n-button type="warning">管理员操作</n-button>
 ```
 
 **规则**:
 - 主要操作使用 `type="primary"`
-- 危险操作使用 `type="danger"`
+- 危险操作使用 `type="error"`（Naive UI 叫 error，不是 danger）
 - 管理员相关使用 `type="warning"`
 - 全宽按钮添加 `class="action-button"` 并在 CSS 中定义 `width: 100%`
 
 ### 卡片
 
 ```vue
-<el-card class="content-card">
-  <template #header>
-    <div class="card-header">
-      <h3>卡片标题</h3>
-    </div>
-  </template>
+<n-card class="content-card" title="卡片标题">
   <!-- 内容 -->
-</el-card>
+</n-card>
 ```
 
 **规则**:
@@ -180,30 +175,30 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 ### 表单
 
 ```vue
-<el-form :model="form" :rules="rules" ref="formRef" label-width="80px">
-  <el-form-item label="标签" prop="field">
-    <el-input v-model="form.field" placeholder="请输入..." />
-  </el-form-item>
-</el-form>
+<n-form :model="form" :rules="rules" ref="formRef" label-placement="left" label-width="80">
+  <n-form-item label="标签" path="field">
+    <n-input v-model:value="form.field" placeholder="请输入..." />
+  </n-form-item>
+</n-form>
 ```
 
 **规则**:
 - 标签宽度 80px（桌面）
-- 移动端使用 `label-position="top"`
+- 移动端使用 `label-placement="top"`
 - 必填项使用 `required: true` 规则
 
 ### 标签
 
 ```vue
 <!-- 信息标签 -->
-<el-tag>标签</el-tag>
+<n-tag>标签</n-tag>
 
 <!-- 管理员标签 -->
-<el-tag type="warning">管理员</el-tag>
+<n-tag type="warning">管理员</n-tag>
 
 <!-- 状态标签 -->
-<el-tag type="success">成功</el-tag>
-<el-tag type="danger">失败</el-tag>
+<n-tag type="success">成功</n-tag>
+<n-tag type="error">失败</n-tag>
 ```
 
 ---
@@ -215,7 +210,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 ```vue
 <template>
   <div class="login-page">
-    <el-card class="login-card">
+    <n-card class="login-card">
       <template #header>
         <div class="card-header">
           <div class="brand-logo">📱</div>
@@ -224,7 +219,7 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
         </div>
       </template>
       <!-- 表单内容 -->
-    </el-card>
+    </n-card>
   </div>
 </template>
 
@@ -284,18 +279,32 @@ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
 - **应用 Logo**: 📱 (U+1F4F1)
 - 可以替换为自定义 SVG 图标
 
-### Element Plus 图标
+### Ionicons 图标
 
-使用 Element Plus 图标库：
+使用 `@vicons/ionicons5`，用 `n-icon` 包一层：
 
 ```vue
 <script setup>
-import { Edit, Delete, Plus, Search } from '@element-plus/icons-vue'
+import { NIcon } from 'naive-ui'
+import { Add, Close, RefreshOutline } from '@vicons/ionicons5'
 </script>
 
 <template>
-  <el-icon><Edit /></el-icon>
+  <n-icon><Add /></n-icon>
 </template>
+```
+
+按钮里的图标放在 `#icon` 插槽：`<n-button><template #icon><n-icon><Add /></n-icon></template></n-button>`。
+
+### 全局提示与确认
+
+消息和二次确认从 `src/utils/feedback.js` 引入，不要在组件里另造弹层：
+
+```js
+import { message, confirm } from '../utils/feedback'
+
+message.success('已保存')
+if (await confirm({ title: '删除', content: '确定删除？', positiveText: '删除' })) { /* ... */ }
 ```
 
 ---
@@ -376,7 +385,7 @@ import { Edit, Delete, Plus, Search } from '@element-plus/icons-vue'
 3. **CSS 类** - 可维护、可复用
 4. **响应式设计** - `max-width` + 断点
 5. **微妙的阴影** - `0 2px 12px rgba(0, 0, 0, 0.08)`
-6. **功能性图标** - Element Plus 图标库
+6. **功能性图标** - Ionicons 图标库（`@vicons/ionicons5`）
 7. **任务导向布局** - 清晰的操作流程
 
 ---
@@ -413,7 +422,8 @@ import { Edit, Delete, Plus, Search } from '@element-plus/icons-vue'
 
 ## 参考资源
 
-- [Element Plus 文档](https://element-plus.org/)
+- [Naive UI 文档](https://www.naiveui.com/en-US/components/button)
+- [Ionicons（图标库）](https://ionic.io/ionicons)
 - [WCAG 2.1 指南](https://www.w3.org/WAI/WCAG21/quickref/)
 - [Material Design 色彩系统](https://material.io/design/color/)
 - [设计审查报告](.gstack/design-reports/design-audit-localhost-2026-03-23.md)

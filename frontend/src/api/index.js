@@ -64,9 +64,10 @@ export async function streamMessage(sessionId, content, handlers, options = {}) 
 }
 
 /** 上传一个文件到当前会话的工作区；onProgress(0~100) 报告进度。返回 {name, size}（重名时 name 会被改成 "a (1).txt"）。 */
-export const uploadFile = (sessionId, file, onProgress) => {
+export const uploadFile = (sessionId, file, onProgress, dir = '') => {
   const form = new FormData()
   form.append('file', file)
+  if (dir) form.append('dir', dir) // 工作区内的子目录，如 "src/utils"
   return http
     .post(`/sessions/${sessionId}/files/`, form, {
       onUploadProgress: (e) => e.total && onProgress?.(Math.round((e.loaded / e.total) * 100)),
@@ -132,3 +133,7 @@ export const writeWorkspaceFile = (sessionId, path, content) =>
 // 图片/视频直接给 <img>/<video> 的 src 用：浏览器自己带 cookie 和 Range 请求，不走 axios
 export const workspaceMediaUrl = (sessionId, path) =>
   `/api/sessions/${sessionId}/workspace/media/?path=${encodeURIComponent(path)}&t=${Date.now()}`
+
+/** 下载工作区里一个文件的地址（Content-Disposition: attachment，浏览器直接保存）。 */
+export const workspaceDownloadUrl = (sessionId, path) =>
+  `/api/sessions/${sessionId}/workspace/download/?path=${encodeURIComponent(path)}`

@@ -219,6 +219,13 @@ def workspace_media(session: ChatSession, rel_path: str) -> tuple[Path, str] | N
     return path, content_type
 
 
+def workspace_file_path(session: ChatSession, rel_path: str) -> Path | None:
+    """工作区里任意一个文件的绝对路径（用于下载）；不存在或跑出工作区就是 None。"""
+    root = Path(harness.workspace_dir(session)).resolve()
+    path = (root / rel_path).resolve()
+    return path if path.is_relative_to(root) and path.is_file() else None
+
+
 def write_workspace_file(session: ChatSession, rel_path: str, content: str) -> bool:
     """覆盖工作区里一个已有文件的文本内容；不存在或跑出工作区返回 False。内容超过 MAX_VIEW_BYTES 抛 ValueError。
 
@@ -305,12 +312,18 @@ def _free_name(directory: Path, name: str) -> str:
     return candidate
 
 
-def save_upload(session: ChatSession, uploaded) -> dict:
-    """把上传的文件存进这个会话的工作区（和模型的文件工具是同一个目录），返回 {"name", "size"}。"""
+def save_upload(session: ChatSession, uploaded, sub_dir: str = "") -> dict:
+    """把上传的文件存进这个会话的工作区（和模型的文件工具是同一个目录），返回 {"name", "size"}。
+
+    sub_dir 是工作区内的相对子目录（可以多级，不存在就创建）；跑出工作区抛 UploadError。
+    """
     if uploaded.size > settings.HARNESS_MAX_UPLOAD_BYTES:
         raise UploadError(f"文件太大，最大 {settings.HARNESS_MAX_UPLOAD_BYTES // (1024 * 1024)} MB", status=413)
     name = _safe_file_name(uploaded.name or "")
-    directory = Path(harness.workspace_dir(session))
+    root = Path(harness.workspace_dir(session)).resolve()
+    directory = (root / sub_dir).resolve()
+    if not directory.is_relative_to(root):  # 挡住 ../ 和绝对路径
+        raise UploadError("目标目录不合法")
     directory.mkdir(parents=True, exist_ok=True)
     name = _free_name(directory, name)
     with open(directory / name, "xb") as f:  # x：万一并发下撞了名，报错而不是覆盖

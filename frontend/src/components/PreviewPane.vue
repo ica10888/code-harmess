@@ -1,6 +1,8 @@
 <script setup>
 // 预览标签：把工作流日志里的超链接页面内嵌进来（iframe）。每个链接一个浏览器式的小标签，可切换；有刷新和新标签页打开。
 import { computed, ref, watch } from 'vue'
+import { NButton, NIcon, NInput } from 'naive-ui'
+import { RefreshOutline } from '@vicons/ionicons5'
 
 const props = defineProps({ links: { type: Array, default: () => [] } })
 
@@ -84,9 +86,12 @@ function sandboxFor(link) {
         </div>
       </div>
       <div class="bar">
-        <el-button size="small" title="刷新当前页面" @click="refresh">🔄 刷新</el-button>
-        <el-input :model-value="selected" size="small" readonly class="url" />
-        <el-button size="small" tag="a" :href="selected" target="_blank" rel="noopener noreferrer">新标签页打开</el-button>
+        <n-button size="small" title="刷新当前页面" @click="refresh">
+          <template #icon><n-icon><RefreshOutline /></n-icon></template>
+          刷新
+        </n-button>
+        <n-input :value="selected" size="small" readonly class="url" />
+        <n-button size="small" tag="a" :href="selected" target="_blank" rel="noopener noreferrer">新标签页打开</n-button>
       </div>
       <div class="frames">
         <iframe

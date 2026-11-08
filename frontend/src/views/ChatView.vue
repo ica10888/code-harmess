@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { NButton, NInput, NSelect, NTabPane, NTabs } from 'naive-ui'
+import { message } from '../utils/feedback'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
 import FileChangeBanner from '../components/FileChangeBanner.vue'
@@ -89,6 +90,9 @@ async function selectSession(id) {
   closeStream = openStream(id, last, (m) => addMessages([m]))
 }
 
+// 会话下拉框的选项
+const sessionOptions = computed(() => sessions.value.map((s) => ({ label: s.title || '新会话', value: s.id })))
+
 const currentSession = computed(() => sessions.value.find((s) => s.id === currentId.value))
 
 // 每次请求完成后更新一次计数：重新取会话列表，只取当前会话的三个计数
@@ -161,7 +165,7 @@ async function send() {
     })
     if (uploaded) {
       const renamed = uploaded.name !== attachment.name ? `（重名，已存为 ${uploaded.name}）` : ''
-      ElMessage.success(`已上传 ${uploaded.name}，${formatSize(uploaded.size)}${renamed}`)
+      message.success(`已上传 ${uploaded.name}，${formatSize(uploaded.size)}${renamed}`)
     }
     // 成功才清空；失败时保留文字和文件，用户可以直接重试
     draft.value = ''
@@ -169,11 +173,11 @@ async function send() {
     refreshCounts()
   } catch (e) {
     if (e.stage === 'upload') {
-      ElMessage.error(`文件上传失败，文本未发送：${uploadErrorMessage(e.cause)}`)
+      message.error(`文件上传失败，文本未发送：${uploadErrorMessage(e.cause)}`)
     } else {
       // 发送阶段失败：文件其实已经传上去了，别让用户重传，只需重发文字
       if (attachment) pendingFile.value = null
-      ElMessage.error(attachment ? '文件已上传，但消息发送失败，请重试' : '发送失败，请重试')
+      message.error(attachment ? '文件已上传，但消息发送失败，请重试' : '发送失败，请重试')
     }
   } finally {
     stage.value = ''
@@ -248,7 +252,7 @@ onBeforeUnmount(() => closeStream && closeStream())
 <template>
   <div class="chat" :data-view="view">
     <aside class="sidebar">
-      <el-button type="primary" class="new" @click="newSession">新建会话</el-button>
+      <n-button type="primary" class="new" @click="newSession">新建会话</n-button>
       <div
         v-for="s in sessions"
         :key="s.id"
@@ -263,7 +267,7 @@ onBeforeUnmount(() => closeStream && closeStream())
 
     <!-- 窄屏专用：左右各两个悬浮按钮，一次只显示一个页面（左：会话 / 对话；右：插件 / 工作流） -->
     <div class="fabs left">
-      <el-button
+      <n-button
         v-for="f in LEFT_FABS"
         :key="f.view"
         circle
@@ -273,10 +277,10 @@ onBeforeUnmount(() => closeStream && closeStream())
         @click="toggleView(f.view)"
       >
         {{ f.icon }}
-      </el-button>
+      </n-button>
     </div>
     <div class="fabs right">
-      <el-button
+      <n-button
         v-for="f in RIGHT_FABS"
         :key="f.view"
         circle
@@ -286,26 +290,25 @@ onBeforeUnmount(() => closeStream && closeStream())
         @click="toggleView(f.view)"
       >
         {{ f.icon }}
-      </el-button>
+      </n-button>
     </div>
 
     <main class="main">
       <!-- 标签行：选择会话、切换到工作区 -->
       <div class="tabs">
-        <el-tabs v-model="tab" class="tab-switch">
-          <el-tab-pane label="💬 会话" name="chat" />
-          <el-tab-pane label="📁 工作区" name="workspace" />
-          <el-tab-pane label="🌐 预览" name="preview" />
-        </el-tabs>
-        <el-select
-          :model-value="currentId"
+        <n-tabs v-model:value="tab" class="tab-switch">
+          <n-tab-pane name="chat" display-directive="show"><template #tab>💬 会话</template></n-tab-pane>
+          <n-tab-pane name="workspace" display-directive="show"><template #tab>📁 工作区</template></n-tab-pane>
+          <n-tab-pane name="preview" display-directive="show"><template #tab>🌐 预览</template></n-tab-pane>
+        </n-tabs>
+        <n-select
+          :value="currentId"
           size="small"
           class="session-select"
           placeholder="选择会话"
-          @change="selectSession"
-        >
-          <el-option v-for="s in sessions" :key="s.id" :label="s.title || '新会话'" :value="s.id" />
-        </el-select>
+          :options="sessionOptions"
+          @update:value="selectSession"
+        />
       </div>
 
       <PreviewPane ref="previewPane" v-show="tab === 'preview'" :links="previewLinks" />
@@ -347,11 +350,11 @@ onBeforeUnmount(() => closeStream && closeStream())
 
       <div v-show="tab === 'chat'" class="composer">
         <MarkdownPreview :text="draft" />
-        <el-input
-          v-model="draft"
+        <n-input
+          v-model:value="draft"
           type="textarea"
           :rows="3"
-          resize="none"
+          :resizable="false"
           placeholder="支持 Markdown，Enter 发送，Shift+Enter 换行"
           @keydown.enter.exact="onEnter"
         />
@@ -365,14 +368,14 @@ onBeforeUnmount(() => closeStream && closeStream())
               :label="`${currentSession.request_count} 次请求 · ${currentSession.turn_count} 轮 · ${currentSession.tool_count} 次工具`"
             />
             <ModelPicker v-model="modelChoice" :disabled="sending" />
-            <el-button
+            <n-button
               type="primary"
               :loading="sending"
               :disabled="!draft.trim() && !pendingFile"
               @click="send"
             >
               {{ stage || '发送' }}
-            </el-button>
+            </n-button>
           </div>
         </div>
       </div>
@@ -380,7 +383,7 @@ onBeforeUnmount(() => closeStream && closeStream())
 
     <!-- 右栏：插件框在上，工作流框在下；一个按钮同时收起 / 展开两个框（只是隐藏，状态不丢） -->
     <aside class="side-panels" :class="{ collapsed: rightCollapsed }">
-      <el-button
+      <n-button
         circle
         size="small"
         class="toggle"
@@ -388,7 +391,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         @click="rightCollapsed = !rightCollapsed"
       >
         {{ rightCollapsed ? '‹' : '×' }}
-      </el-button>
+      </n-button>
       <div v-show="!rightCollapsed" class="panels">
         <PluginPanel :session-id="currentId" :selected="lastSelection?.skill_selection.plugins" :selected-key="lastSelection?.id" />
         <PluginPanel
@@ -480,11 +483,13 @@ onBeforeUnmount(() => closeStream && closeStream())
   padding: 0 20px;
   border-bottom: 1px solid #e4e7ed;
 }
-.tab-switch :deep(.el-tabs__header) {
-  margin: 0;
+/* 只用标签头切换，内容区由下面各自的 v-show 控制；tab-pane 本身没有内容，所以去掉它占的空间 */
+.tab-switch :deep(.n-tabs-pane-wrapper),
+.tab-switch :deep(.n-tab-pane) {
+  display: none !important; /* 空的 pane 自带 12px 顶部内边距，会把标签顶偏，和右边的下拉框对不齐 */
 }
-.tab-switch :deep(.el-tabs__nav-wrap::after) {
-  display: none;
+.tab-switch :deep(.n-tabs-nav) {
+  border-bottom: none;
 }
 .session-select {
   width: 200px;
@@ -535,24 +540,49 @@ onBeforeUnmount(() => closeStream && closeStream())
   color: #fff;
 }
 .composer {
+  container: composer / inline-size; /* 子组件按输入区自身的宽度压缩（中间栏宽度取决于两侧栏，不能看屏幕宽度） */
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 16px 20px;
   border-top: 1px solid #e4e7ed;
 }
-/* 按钮一排：左边选文件；右边是模型、强度、发送。整排垂直居中，所以高度不同的控件也上下对齐 */
+/* 按钮一排，任何宽度都不折行：左边选文件；右边是统计、模型、强度、发送。整排垂直居中，所以高度不同的控件也上下对齐。
+   放不下时不换行，而是由各组件按 @container composer 逐级压缩（见 ModelPicker / SessionStats / FileUploadButton） */
 .composer .actions {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
+  padding-bottom: 14px; /* 滑块的刻度文字挂在这一排下方，留出位置不被截 */
   justify-content: space-between;
-  gap: 16px;
+  gap: 8px 16px;
+}
+.composer .actions > :first-child {
+  flex: 0 1 auto; /* 左边先压缩：选了文件时文件名省略，右边的控件保持完整 */
+  min-width: 34px; /* 至少留下「+」按钮，不能被压到 0 */
+}
+/* 手机档：选好文件后「+」和「✕」两个方块都要完整保留，空间由右边的模型 / 滑块让出 */
+@container composer (max-width: 420px) {
+  .composer .actions > :first-child {
+    flex-shrink: 0;
+  }
 }
 .composer .actions .right {
   display: flex;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
   align-items: center;
   gap: 16px;
-  min-width: 0;
+  margin-left: auto;
+}
+.composer .actions .right :deep(.n-button) {
+  flex-shrink: 0;
+}
+@container composer (max-width: 600px) {
+  .composer .actions,
+  .composer .actions .right {
+    gap: 8px;
+  }
 }
 /* 窄屏（手机 390px）：三栏改为上下堆叠，聊天区占剩余高度，不再被两侧栏挤没 */
 @media (max-width: 768px) {
@@ -618,8 +648,12 @@ onBeforeUnmount(() => closeStream && closeStream())
     min-width: 0;
   }
   .session-select {
-    width: 120px;
+    width: 104px;
     flex-shrink: 0;
+  }
+  /* 标签之间的间距（默认 36px，是组件内联的变量，覆盖不了）收小：改垫片宽度，360px 宽的手机上三个标签才放得下 */
+  .tab-switch :deep(.n-tabs-tab-pad) {
+    width: 14px;
   }
   .messages {
     padding: 12px;
@@ -627,12 +661,6 @@ onBeforeUnmount(() => closeStream && closeStream())
   /* 输入区贴底时避开 iPhone 底部横条 */
   .composer {
     padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
-  }
-  /* 发送这一行保持在一行内，不换行 */
-  .composer .actions,
-  .composer .actions .right {
-    flex-wrap: nowrap;
-    gap: 8px;
   }
 }
 </style>

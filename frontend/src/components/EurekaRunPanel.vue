@@ -2,6 +2,7 @@
 // eureka 提示条下面的「工作流进度」：展示后端 runner 一个阶段一个阶段执行的情况（阶段状态 + 插件通过 webhook 打印的文字）。
 // 刷新页面后，后端消息里带着 run 的 id 和状态，没跑完的会继续拉取，直到结束。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { NTag } from 'naive-ui'
 import { getEurekaRun } from '../api'
 import { STATUS_LABEL, isFinished, nextDelay, progressSummary, shouldPoll, splitLinks, stageIcon } from '../utils/eurekaRun'
 
@@ -16,6 +17,9 @@ const props = defineProps({
 const run = ref(null) // 后端返回的完整进度；还没取到时是 null
 const failedToLoad = ref(false)
 const open = ref(true)
+
+// stageIcon 的 kind 沿用旧名字（danger / info），Naive UI 的 tag 叫 error / default
+const tagType = (s) => ({ danger: 'error', info: 'default' }[stageIcon(s).kind] ?? stageIcon(s).kind)
 
 const summary = computed(() => progressSummary(run.value))
 const status = computed(() => run.value?.status ?? props.initialStatus)
@@ -49,7 +53,7 @@ onBeforeUnmount(() => {
   <div class="run" :class="status" role="region" aria-label="工作流进度">
     <button class="head" type="button" :aria-expanded="open" @click="open = !open">
       <span class="title">工作流</span>
-      <el-tag size="small" :type="stageIcon(status).kind">{{ STATUS_LABEL[status] ?? status }}</el-tag>
+      <n-tag size="small" :type="tagType(status)">{{ STATUS_LABEL[status] ?? status }}</n-tag>
       <span class="summary">{{ summary.text }}</span>
       <span class="arrow">{{ open ? '▾' : '▸' }}</span>
     </button>
@@ -59,7 +63,7 @@ onBeforeUnmount(() => {
       <ol v-if="run" class="stages">
         <li v-for="s in run.stages" :key="s.key" :class="s.status">
           <div class="row">
-            <el-tag size="small" :type="stageIcon(s.status).kind" effect="plain">{{ STATUS_LABEL[s.status] ?? s.status }}</el-tag>
+            <n-tag size="small" :type="tagType(s.status)">{{ STATUS_LABEL[s.status] ?? s.status }}</n-tag>
             <span class="stage-title">{{ s.title }}</span>
           </div>
           <ul v-if="s.logs.length" class="logs">

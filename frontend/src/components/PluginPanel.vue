@@ -7,7 +7,8 @@
 //   查看：点名称弹窗看全文。
 //   删除：每行右边的「删除」（先二次确认）。默认插件（后端 config.ini 配置的目录里的）所有会话都有、不能删除，旁边带「默认」标记。
 import { ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { NButton, NEmpty, NInput, NModal, NSpin, NTag, NUpload } from 'naive-ui'
+import { LONG, confirm, message } from '../utils/feedback'
 import {
   addPlugin,
   addWorkflow,
@@ -65,6 +66,8 @@ watch(
   },
 )
 
+const DIALOG_STYLE = { width: 'min(640px, 94vw)' }
+
 const plugins = ref([])
 const loading = ref(false)
 const busy = ref(false) // 增加 / 删除进行中，期间按钮都不可点，免得并发操作
@@ -82,7 +85,7 @@ watch(
       const list = await api.list(id)
       if (token === loadToken) plugins.value = list
     } catch (err) {
-      if (token === loadToken) ElMessage.error(pluginErrorMessage(err))
+      if (token === loadToken) message.error(pluginErrorMessage(err))
     } finally {
       if (token === loadToken) loading.value = false
     }
@@ -90,15 +93,15 @@ watch(
   { immediate: true },
 )
 
-// el-upload 的 before-upload 返回 false：不走它自带的上传，由我们自己传，这样能复用检查和统一的错误提示
-async function onPick(file) {
+// n-upload 的 before-upload 返回 false：不走它自带的上传，由我们自己传，这样能复用检查和统一的错误提示
+async function onPick({ file: { file } }) {
   const problem = checkSkillFile(file)
   if (problem) {
-    ElMessage.warning(problem)
+    message.warning(problem)
     return false
   }
   if (!props.sessionId) {
-    ElMessage.warning('请先选择或新建一个会话')
+    message.warning('请先选择或新建一个会话')
     return false
   }
   busy.value = true
@@ -106,14 +109,14 @@ async function onPick(file) {
     // 插件先读文件开头检查 frontmatter：不合格就提示原因，不上传；工作流对内容没有要求
     const contentProblem = isWorkflow ? null : checkSkillContent(await readHead(file))
     if (contentProblem) {
-      ElMessage({ type: 'warning', message: contentProblem, duration: 6000, showClose: true })
+      message.warning(contentProblem, LONG)
       return false
     }
     const created = await api.add(props.sessionId, file)
     plugins.value = [...plugins.value, created].sort((a, b) => a.name.localeCompare(b.name))
-    ElMessage.success(`已添加${noun} ${created.name}`)
+    message.success(`已添加${noun} ${created.name}`)
   } catch (err) {
-    ElMessage.error(pluginErrorMessage(err))
+    message.error(pluginErrorMessage(err))
   } finally {
     busy.value = false
   }
@@ -130,17 +133,17 @@ async function view(plugin) {
     draft.value = viewing.value.content
     viewVisible.value = true
   } catch (err) {
-    ElMessage.error(pluginErrorMessage(err))
+    message.error(pluginErrorMessage(err))
   }
 }
 async function save() {
   busy.value = true
   try {
     viewing.value = await api.update(props.sessionId, viewing.value.name, draft.value)
-    ElMessage.success(`已保存${noun} ${viewing.value.name}`)
+    message.success(`已保存${noun} ${viewing.value.name}`)
     viewVisible.value = false
   } catch (err) {
-    ElMessage({ type: 'error', message: pluginErrorMessage(err), duration: 6000, showClose: true })
+    message.error(pluginErrorMessage(err), LONG)
   } finally {
     busy.value = false
   }
@@ -163,32 +166,25 @@ async function create() {
   try {
     const created = await api.create(props.sessionId, name, newContent.value)
     plugins.value = [...plugins.value, created].sort((a, b) => a.name.localeCompare(b.name))
-    ElMessage.success(`已新建${noun} ${created.name}`)
+    message.success(`已新建${noun} ${created.name}`)
     creating.value = false
   } catch (err) {
-    ElMessage({ type: 'error', message: pluginErrorMessage(err), duration: 6000, showClose: true })
+    message.error(pluginErrorMessage(err), LONG)
   } finally {
     busy.value = false
   }
 }
 
 async function remove(plugin) {
-  try {
-    await ElMessageBox.confirm(`确定删除${noun} ${plugin.name}？`, `删除${noun}`, {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
-  } catch {
-    return // 点了取消
-  }
+  const ok = await confirm({ title: `删除${noun}`, content: `确定删除${noun} ${plugin.name}？`, positiveText: '删除' })
+  if (!ok) return // 点了取消
   busy.value = true
   try {
     await api.remove(props.sessionId, plugin.name)
     plugins.value = removeByName(plugins.value, plugin.name)
-    ElMessage.success(`已删除${noun} ${plugin.name}`)
+    message.success(`已删除${noun} ${plugin.name}`)
   } catch (err) {
-    ElMessage.error(pluginErrorMessage(err))
+    message.error(pluginErrorMessage(err))
   } finally {
     busy.value = false
   }
@@ -201,46 +197,50 @@ async function remove(plugin) {
       <h3 class="title">{{ isWorkflow ? '工作流(Workflow)' : '插件(Skills)' }}</h3>
     </div>
 
-    <div v-loading="loading" class="list">
-      <el-empty v-if="!loading && !plugins.length" :description="`这个会话还没有${noun}`" :image-size="60" />
+    <n-spin :show="loading" class="spin">
+      <n-empty v-if="!loading && !plugins.length" :description="`这个会话还没有${noun}`" size="small" />
       <div v-for="p in plugins" :key="p.name" class="item">
         <span class="name" :class="{ rainbow: flashing.includes(p.skill_name) }" role="button" title="点击查看内容" @click="view(p)">{{ p.name }}</span>
-        <el-tag v-if="p.default" size="small" type="info" class="tag" :title="`默认${noun}：所有会话都有，不能删除`">默认</el-tag>
-        <el-button v-else link type="danger" size="small" class="del" :disabled="busy" @click="remove(p)">删除</el-button>
+        <n-tag v-if="p.default" size="small" class="tag" :title="`默认${noun}：所有会话都有，不能删除`">默认</n-tag>
+        <n-button v-else text type="error" size="small" class="del" :disabled="busy" @click="remove(p)">删除</n-button>
       </div>
-    </div>
+    </n-spin>
 
     <div class="buttons">
-      <el-upload
+      <n-upload
         :show-file-list="false"
-        :auto-upload="true"
-        :before-upload="onPick"
+        :default-upload="false"
         :disabled="busy || !sessionId"
         :multiple="false"
         accept=".md"
         class="add"
+        @before-upload="onPick"
       >
-        <el-button :disabled="busy || !sessionId">上传</el-button>
-      </el-upload>
-      <el-button :disabled="busy || !sessionId" @click="openCreate">新建</el-button>
+        <n-button :disabled="busy || !sessionId">上传</n-button>
+      </n-upload>
+      <n-button :disabled="busy || !sessionId" @click="openCreate">新建</n-button>
     </div>
 
-    <el-dialog v-model="viewVisible" :title="viewing?.name" width="min(640px, 94vw)" append-to-body>
-      <el-input v-model="draft" type="textarea" :readonly="viewing?.default" :rows="18" resize="none" />
+    <n-modal v-model:show="viewVisible" preset="card" :title="viewing?.name" :style="DIALOG_STYLE">
+      <n-input v-model:value="draft" type="textarea" :readonly="viewing?.default" :rows="18" :resizable="false" />
       <template v-if="!viewing?.default" #footer>
-        <el-button @click="viewVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="busy || draft === viewing?.content" @click="save">保存</el-button>
+        <div class="dialog-footer">
+          <n-button @click="viewVisible = false">取消</n-button>
+          <n-button type="primary" :disabled="busy || draft === viewing?.content" @click="save">保存</n-button>
+        </div>
       </template>
-    </el-dialog>
+    </n-modal>
 
-    <el-dialog v-model="creating" :title="`新建${noun}`" width="min(640px, 94vw)" append-to-body>
-      <el-input v-model="newName" placeholder="文件名，如 notes.md" class="new-name" />
-      <el-input v-model="newContent" type="textarea" :rows="14" resize="none" />
+    <n-modal v-model:show="creating" preset="card" :title="`新建${noun}`" :style="DIALOG_STYLE">
+      <n-input v-model:value="newName" placeholder="文件名，如 notes.md" class="new-name" />
+      <n-input v-model:value="newContent" type="textarea" :rows="14" :resizable="false" />
       <template #footer>
-        <el-button @click="creating = false">取消</el-button>
-        <el-button type="primary" :disabled="busy || !newName.trim()" @click="create">新建</el-button>
+        <div class="dialog-footer">
+          <n-button @click="creating = false">取消</n-button>
+          <n-button type="primary" :disabled="busy || !newName.trim()" @click="create">新建</n-button>
+        </div>
       </template>
-    </el-dialog>
+    </n-modal>
   </section>
 </template>
 
@@ -271,9 +271,12 @@ async function remove(plugin) {
   color: #303133;
 }
 /* 列表占满剩下的高度，插件多了就在列表里滚动；按钮始终固定在底部 */
-.list {
+.spin {
   flex: 1;
   min-height: 0;
+}
+.spin :deep(.n-spin-content) {
+  height: 100%;
   overflow-y: auto;
 }
 /* 竖向排列：每个插件独占一行，删除按钮在右边 */
@@ -334,7 +337,10 @@ async function remove(plugin) {
 .new-name {
   margin-bottom: 8px;
 }
-.buttons .add {
-  display: inline-flex;
+/* 弹窗是挂在 body 上的，宽度写在 style 里 */
+.dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 </style>

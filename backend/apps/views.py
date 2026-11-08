@@ -5,7 +5,7 @@ import time
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.http import Http404, HttpResponse, StreamingHttpResponse
+from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.response import Response
@@ -122,7 +122,7 @@ class FileUploadView(APIView):
         if uploaded is None:
             return Response({"detail": "请选择要上传的文件（表单字段 file）"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            return Response(services.save_upload(session, uploaded), status=status.HTTP_201_CREATED)
+            return Response(services.save_upload(session, uploaded, str(request.data.get("dir", ""))), status=status.HTTP_201_CREATED)
         except services.UploadError as e:
             return Response({"detail": str(e)}, status=e.status)
 
@@ -239,6 +239,19 @@ class WorkspaceMediaView(APIView):
         response["Accept-Ranges"] = "bytes"
         response["X-Content-Type-Options"] = "nosniff"
         response["Content-Security-Policy"] = "sandbox"  # SVG 被直接打开时也不能执行脚本
+        return response
+
+
+class WorkspaceDownloadView(APIView):
+    """下载本会话工作区里的一个文件（任意类型）：?path=<相对路径>。"""
+
+    def get(self, request, session_id):
+        session = get_own_session(request, session_id)
+        path = services.workspace_file_path(session, request.query_params.get("path", ""))
+        if path is None:
+            raise Http404
+        response = FileResponse(open(path, "rb"), as_attachment=True, filename=path.name)
+        response["X-Content-Type-Options"] = "nosniff"
         return response
 
 
