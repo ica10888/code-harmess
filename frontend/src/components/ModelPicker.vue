@@ -111,6 +111,43 @@ const currentEffort = computed(() => efforts.value[effortSlider.value])
   align-items: center;
   gap: 12px;
 }
+/* 下拉框：悬停 / 展开时边框和光晕变冷蓝；滑块：悬停时圆点放大发光，拖动时再放大一点 */
+.model :deep(.n-base-selection) {
+  transition: box-shadow 0.25s ease, transform 0.25s ease;
+}
+.model:hover :deep(.n-base-selection) {
+  box-shadow: 0 0 0 1px #3d6b8c, 0 0 8px rgba(61, 107, 140, 0.45);
+}
+.model:active :deep(.n-base-selection) {
+  transform: scale(0.97);
+}
+.slider :deep(.n-slider-handle) {
+  transition: transform 0.2s ease, box-shadow 0.25s ease;
+}
+.slider:hover :deep(.n-slider-handle) {
+  transform: scale(1.3);
+  box-shadow: 0 0 8px rgba(61, 107, 140, 0.7);
+}
+.slider:active :deep(.n-slider-handle) {
+  transform: scale(1.5);
+}
+.effort-title {
+  transition: color 0.25s ease;
+}
+.effort:hover .effort-title {
+  color: #3d6b8c;
+}
+@media (prefers-reduced-motion: reduce) {
+  .model :deep(.n-base-selection),
+  .slider :deep(.n-slider-handle) {
+    transition: none;
+  }
+  .model:active :deep(.n-base-selection),
+  .slider:hover :deep(.n-slider-handle),
+  .slider:active :deep(.n-slider-handle) {
+    transform: none;
+  }
+}
 .effort-title {
   font-size: 13px;
   color: #606266;

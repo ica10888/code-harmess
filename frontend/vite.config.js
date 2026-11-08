@@ -35,6 +35,7 @@ function vendorChunk(id) {
   if (/[\/]node_modules[\/](markdown-it|mdurl|uc\.micro|entities|linkify-it)[\/]/.test(id)) return 'markdown'
   if (/[\/]node_modules[\/](prismjs|vue-prism-editor)[\/]/.test(id)) return 'editor'
   if (/[\/]node_modules[\/]axios[\/]/.test(id)) return 'axios'
+  if (/[\/]node_modules[\/](motion-v|framer-motion|motion-dom|motion-utils)[\/]/.test(id)) return 'motion'
 }
 
 export default defineConfig({

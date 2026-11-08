@@ -1,7 +1,8 @@
 <script setup>
 // 输入框下方的计数文字；点击弹出「会话统计」：请求和工具记录的平均值。每次点开都重新取一次，所以总是最新的。
 import { h, ref } from 'vue'
-import { NButton, NDataTable, NModal, NPopover } from 'naive-ui'
+import { NButton, NDataTable, NIcon, NModal, NPopover } from 'naive-ui'
+import { StatsChartOutline } from '@vicons/ionicons5'
 import { getRequestContent, getSessionStats, getSessionStatsDetail } from '../api'
 
 const props = defineProps({
@@ -107,7 +108,7 @@ const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits
 <template>
   <n-popover trigger="click" placement="top" :width="260" @update:show="(show) => show && load()">
     <template #trigger>
-      <span class="counts" role="button" title="点击查看会话统计"><span class="full">{{ label }}</span><span class="short">统计</span></span>
+      <span class="counts" role="button" title="点击查看会话统计"><n-icon class="stats-icon"><StatsChartOutline /></n-icon><span class="full">{{ label }}</span><span class="short">统计</span></span>
     </template>
     <div class="title">
       <span>会话统计<span class="title-counts">（{{ label }}）</span></span>
@@ -171,6 +172,9 @@ const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits
 
 <style scoped>
 .counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: #909399;
   white-space: nowrap;
@@ -195,8 +199,31 @@ const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits
     display: inline;
   }
 }
+.counts {
+  transition: color 0.2s ease;
+}
 .counts:hover {
-  color: #409eff;
+  color: #3d6b8c;
+}
+/* 统计图标：悬停时抖一下并发光，按下时缩小 */
+.stats-icon {
+  transition: transform 0.25s ease, filter 0.25s ease;
+}
+.counts:hover .stats-icon {
+  transform: translateY(-2px) scale(1.25);
+  filter: drop-shadow(0 0 4px #3d6b8c);
+}
+.counts:active .stats-icon {
+  transform: scale(0.8);
+}
+@media (prefers-reduced-motion: reduce) {
+  .stats-icon {
+    transition: none;
+  }
+  .counts:hover .stats-icon,
+  .counts:active .stats-icon {
+    transform: none;
+  }
 }
 .title {
   display: flex;

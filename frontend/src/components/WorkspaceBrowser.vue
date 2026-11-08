@@ -1,7 +1,19 @@
 <script setup>
 // 工作区标签页：左边目录树，右边打开即可编辑的代码框（Prism 高亮，Ctrl+S 保存覆盖原文件）。路径由后端固定为本会话的工作区。
 import { ref, watch, computed, h, onBeforeUnmount } from 'vue'
-import { NButton, NTree } from 'naive-ui'
+import { NButton, NIcon, NTree } from 'naive-ui'
+import {
+  CloudUploadOutline,
+  CodeSlashOutline,
+  DocumentTextOutline,
+  DownloadOutline,
+  FolderOpenOutline,
+  FolderOutline,
+  ImageOutline,
+  MusicalNotesOutline,
+  SaveOutline,
+  VideocamOutline,
+} from '@vicons/ionicons5'
 import { confirm, message } from '../utils/feedback'
 import { listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile, workspaceMediaUrl, workspaceDownloadUrl, uploadFile } from '../api'
 import { PrismEditor } from 'vue-prism-editor'
@@ -169,15 +181,25 @@ const nodeProps = ({ option }) => ({
   'data-dir': option.children ? '1' : '',
   onClick: () => !option.children && openFile(option.path),
 })
-const ICONS = { image: '🖼️', video: '🎬', audio: '🎵' }
+// 节点图标：目录（展开时是打开的文件夹）、图片 / 视频 / 音频、普通文件；悬停动效见样式里的 .node-icon
+const FILE_ICONS = { image: ImageOutline, video: VideocamOutline, audio: MusicalNotesOutline }
+function nodeIcon(option) {
+  if (option.children) return expanded.value.includes(option.path) ? FolderOpenOutline : FolderOutline
+  return FILE_ICONS[mediaKind(option.path)] || DocumentTextOutline
+}
 const renderLabel = ({ option }) =>
-  h('span', { class: { active: option.path === current.value?.path } }, `${option.children ? '📁' : ICONS[mediaKind(option.path)] || '📄'} ${option.label}`)
+  h('span', { class: ['node', { active: option.path === current.value?.path, dir: !!option.children }] }, [
+    h(NIcon, { class: 'node-icon', size: 16 }, { default: () => h(nodeIcon(option)) }),
+    option.label,
+  ])
 
-// 目录树里要展开的目录：外部指定文件的所有上级（只在树第一次渲染时生效）
-const expandedKeys = computed(() => {
-  const parts = props.target?.path.split('/').slice(0, -1) ?? []
-  return parts.map((_, i) => parts.slice(0, i + 1).join('/'))
-})
+// 目录树里展开的目录：一开始是外部指定文件的所有上级；之后由用户点开 / 收起（要知道谁展开了，才能换文件夹图标）
+const expanded = ref(
+  (() => {
+    const parts = props.target?.path.split('/').slice(0, -1) ?? []
+    return parts.map((_, i) => parts.slice(0, i + 1).join('/'))
+  })(),
+)
 
 // 切会话：清掉旧会话的文件，重新读目录
 watch(
@@ -205,18 +227,26 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
     @dragleave="onDragLeave"
     @drop.prevent="onDrop"
   >
-    <div v-if="dragging || uploading" class="drop-hint">{{ uploading ? '上传中…' : '松开鼠标，上传到工作区' }}</div>
+    <Transition name="fade">
+      <div v-if="dragging || uploading" class="drop-hint">
+        <n-icon class="drop-icon" :size="28"><CloudUploadOutline /></n-icon>
+        {{ uploading ? '上传中…' : '松开鼠标，上传到工作区' }}
+      </div>
+    </Transition>
     <div class="split">
       <div class="tree">
         <div class="bar">目录</div>
-        <div v-if="!tree.length" class="empty">工作区还没有文件</div>
+        <div v-if="!tree.length" class="empty">
+          <n-icon class="float-icon" :size="36"><FolderOpenOutline /></n-icon>
+          <div>工作区还没有文件</div>
+        </div>
         <n-tree
           v-else
           :data="tree"
           key-field="path"
           label-field="label"
           block-line
-          :default-expanded-keys="expandedKeys"
+          v-model:expanded-keys="expanded"
           :expand-on-click="true"
           :node-props="nodeProps"
           :render-label="renderLabel"
@@ -224,13 +254,33 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
         />
       </div>
       <div class="file">
-        <div v-if="!current" class="empty">点左边的文件打开</div>
-        <template v-else>
+        <div v-if="!current" class="empty">
+          <n-icon class="float-icon" :size="48"><CodeSlashOutline /></n-icon>
+          <div>点左边的文件打开</div>
+        </div>
+        <!-- 换文件时整块淡入上滑；key 用路径，所以每次打开新文件都会重新播放 -->
+        <div v-else :key="current.path" class="opened">
           <div class="bar">
             <strong>{{ current.path }}</strong>
             <span class="actions">
-              <n-button size="small" @click="download">下载</n-button>
-              <n-button v-if="!current.media" size="small" type="primary" :loading="saving" :disabled="!dirty || current.truncated" title="Ctrl+S" @click="save">保存</n-button>
+              <n-button size="small" class="act download" @click="download">
+                <template #icon><n-icon><DownloadOutline /></n-icon></template>
+                下载
+              </n-button>
+              <n-button
+                v-if="!current.media"
+                size="small"
+                type="primary"
+                class="act save"
+                :class="{ ready: dirty && !current.truncated }"
+                :loading="saving"
+                :disabled="!dirty || current.truncated"
+                title="Ctrl+S"
+                @click="save"
+              >
+                <template #icon><n-icon><SaveOutline /></n-icon></template>
+                保存
+              </n-button>
             </span>
           </div>
           <div v-if="current.media" class="media">
@@ -250,7 +300,7 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
             line-numbers
             :tab-size="4"
           />
-        </template>
+        </div>
       </div>
     </div>
   </div>
@@ -290,8 +340,108 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
   margin-bottom: 8px;
 }
 .tree :deep(.active) {
-  color: #409eff;
+  color: #2f4a63;
   font-weight: 600;
+}
+.tree :deep(.node) {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tree :deep(.node-icon) {
+  color: #4f7f99;
+  transition: transform 0.25s ease, filter 0.25s ease;
+}
+.tree :deep(.dir .node-icon) {
+  color: #2f4a63;
+}
+.tree :deep(.n-tree-node:hover .node-icon) {
+  transform: scale(1.25) rotate(-6deg);
+  filter: drop-shadow(0 0 4px #3d6b8c);
+}
+.tree :deep(.n-tree-node:active .node-icon) {
+  transform: scale(0.85);
+}
+/* 选中的文件：图标常亮冷蓝光晕 */
+.tree :deep(.active .node-icon) {
+  color: #3d6b8c;
+  filter: drop-shadow(0 0 4px #3d6b8c);
+}
+.opened {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  animation: open-in 0.3s ease;
+}
+@keyframes open-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+/* 空状态图标缓慢上下浮动（Inspira UI 的 Float 思路） */
+.float-icon {
+  display: block;
+  margin: 0 auto 8px;
+  color: #4f7f99;
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-6deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(6deg);
+  }
+}
+/* 按钮图标：下载悬停时向下点一下，保存在有未保存修改时轻轻跳动提醒 */
+.act :deep(.n-icon) {
+  transition: transform 0.25s ease;
+}
+.download:hover :deep(.n-icon) {
+  transform: translateY(2px) scale(1.15);
+}
+.save.ready :deep(.n-icon) {
+  animation: nudge 1.4s ease-in-out infinite;
+}
+@keyframes nudge {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.25);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .float-icon,
+  .opened,
+  .drop-icon,
+  .drop-hint,
+  .save.ready :deep(.n-icon) {
+    animation: none;
+  }
+  .tree :deep(.node-icon),
+  .act :deep(.n-icon),
+  .fade-enter-active,
+  .fade-leave-active {
+    transition: none;
+  }
+  .tree :deep(.n-tree-node:hover .node-icon),
+  .tree :deep(.n-tree-node:active .node-icon),
+  .download:hover :deep(.n-icon) {
+    transform: none;
+  }
 }
 .empty,
 .tip {
@@ -372,16 +522,40 @@ watch(() => props.target, (t) => t && openFile(t.path), { immediate: true })
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(64, 158, 255, 0.12);
-  border: 2px dashed #409eff;
-  color: #409eff;
+  flex-direction: column;
+  gap: 8px;
+  background: rgba(47, 74, 99, 0.12);
+  border: 2px dashed #3d6b8c;
+  color: #2f4a63;
   font-size: 16px;
   pointer-events: none; /* 不挡住 drop 事件 */
+  animation: pulse-border 1.2s ease-in-out infinite;
+}
+.drop-icon {
+  animation: drop-bounce 0.9s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  50% {
+    border-color: #8fb3cc;
+    background: rgba(47, 74, 99, 0.2);
+  }
+}
+@keyframes drop-bounce {
+  50% {
+    transform: translateY(-6px);
+  }
 }
 .browser:focus {
   outline: none;
 }
 @container (max-width: 520px) {
+  /* 下载 / 保存按钮只留图标（文字用 .act 里 n-button 的 content 隐藏），把宽度让给文件名 */
+  .act :deep(.n-button__content) {
+    display: none;
+  }
+  .act :deep(.n-button__icon) {
+    margin: 0;
+  }
   .file {
     padding: 8px;
   }

@@ -1,6 +1,18 @@
 <script setup>
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NButton, NInput, NSelect, NTabPane, NTabs } from 'naive-ui'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { NButton, NIcon, NInput, NSelect, NTabPane, NTabs } from 'naive-ui'
+import {
+  AddCircleOutline,
+  ChatbubbleEllipsesOutline,
+  ChatbubblesOutline,
+  ChatbubbleOutline,
+  ChevronForward,
+  ExtensionPuzzleOutline,
+  FolderOpenOutline,
+  GlobeOutline,
+  MenuOutline,
+  PaperPlaneOutline,
+} from '@vicons/ionicons5'
 import { message } from '../utils/feedback'
 import { createSession, listMessages, listSessions, openStream, streamMessage, uploadFile } from '../api'
 import EurekaBanner from '../components/EurekaBanner.vue'
@@ -8,6 +20,8 @@ import FileChangeBanner from '../components/FileChangeBanner.vue'
 import WaitingHint from '../components/WaitingHint.vue'
 import SkillSelectionBanner from '../components/SkillSelectionBanner.vue'
 import ModelPicker from '../components/ModelPicker.vue'
+import ColourfulText from '../components/ColourfulText.vue'
+import MeteorShower from '../components/MeteorShower.vue'
 // 非首屏必需的组件异步加载：工作区（含代码编辑器）、预览、会话统计、进度面板、插件面板、输入预览、上传按钮
 const loadEurekaRunPanel = () => import('../components/EurekaRunPanel.vue')
 const EurekaRunPanel = defineAsyncComponent(loadEurekaRunPanel)
@@ -41,20 +55,30 @@ const pendingFile = ref(null) // 已选好、还没上传的文件；点「发�
 const stage = ref('') // 发送过程中给用户看的一句话（比如「上传文件中…」）
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
+const finished = reactive(new Set()) // 刚流式输出完的回复 id：气泡保留「完成态」的光边（刷新页面后不再有）
 const waitingId = ref(null) // 正在等回复的会话 id；等到第一段回复（或出错）就清空
 // 没写文字、但上传了文件时，用这句话代替，让模型照着去做
 const DEFAULT_TEXT = '请根据我上传的文件开始。'
 const rightCollapsed = ref(false) // 右栏（插件 + 工作流）是否收起（宽屏用）
 // 窄屏（手机）一次只显示一个页面，由左右各两个悬浮按钮切换；宽屏不用这个状态
 const LEFT_FABS = [
-  { view: 'sessions', icon: '☰', title: '会话列表' },
-  { view: 'chat', icon: '💬', title: '对话' },
+  { view: 'sessions', icon: MenuOutline, title: '会话列表' },
+  { view: 'chat', icon: ChatbubbleEllipsesOutline, title: '对话' },
 ]
 const RIGHT_FABS = [
-  { view: 'plugins', icon: '🧩', title: '插件和工作流' },
+  { view: 'plugins', icon: ExtensionPuzzleOutline, title: '插件和工作流' },
 ]
+// 侧栏标题的配色：黑色打底，夹杂冷色（钢蓝、青灰）
+const BRAND_COLORS = ['#0b0f14', '#1c2733', '#2f4a63', '#3d6b8c', '#4f7f99', '#111820']
 const view = ref('chat') // sessions | chat | plugins（插件和工作流合在一页）
 const tab = ref('chat') // 会话框上面的标签：chat（对话）| workspace（工作区）| preview（预览）
+// 已经展示过的消息 id：它们的提示框不再等间隔。切到别的页面时，会话区被隐藏，回来时浏览器会把 CSS 动画重播一遍，
+// 所以离开会话页那一刻，把当时所有消息标成「已展示」，回来就没有间隔了（见下面的 watch）
+const gapDone = reactive(new Set())
+// 离开会话页（切到工作区 / 预览，或手机上切到别的页面）：当前消息都算展示过
+watch([tab, view], ([t, v]) => {
+  if (t !== 'chat' || v !== 'chat') messages.value.forEach((m) => gapDone.add(m.id))
+})
 const previewLinks = ref([]) // 预览页要内嵌的链接：取编号最大（最新）那次工作流运行日志里的
 let previewRunId = 0
 const previewPane = ref(null)
@@ -70,6 +94,17 @@ let closeStream = null
 
 // 离底部不到这个距离，就认为用户正跟着看最新内容；超过了说明在往上翻，不能把页面拽回去
 const STICK_TO_BOTTOM_PX = 80
+
+// 回复下面的四个提示框（eureka、选用插件、文件变更、工作流）不一起蹦出来，而是按顺序一个接一个：
+// 每个框的入场动画延迟 = 它前面「实际出现的框」数量 × BANNER_GAP_S。这里只算出 --gap，动画写在各组件里。
+const BANNER_GAP_S = 0.6
+function gapSeconds(m, slot) {
+  if (gapDone.has(m.id)) return 0
+  const shown = [!!m.eureka, !!m.skill_selection, !!m.file_change, !!m.eureka?.run]
+  const before = shown.slice(0, slot).filter(Boolean).length
+  return (before + 1) * BANNER_GAP_S // +1：第一个框也等一会儿，让回复文字先落定
+}
+const gapStyle = (m, slot) => ({ '--gap': `${gapSeconds(m, slot)}s` })
 
 function scrollToBottom({ force = false } = {}) {
   const el = listEl.value
@@ -94,6 +129,8 @@ async function selectSession(id) {
   previewLinks.value = [] // 预览属于原来的会话
   previewRunId = 0
   messages.value = []
+  finished.clear()
+  gapDone.clear()
   addMessages(await listMessages(id))
   const last = messages.value.length ? messages.value[messages.value.length - 1].id : 0
   closeStream = openStream(id, last, (m) => addMessages([m]))
@@ -201,6 +238,7 @@ async function streamReply(content, options) {
   const sessionId = currentId.value // 回复期间用户可能切走，标题要改在发送时的那个会话上
   waitingId.value = sessionId
   let live = null
+  let final = null // done 事件带来的、存好的真消息
   // delta 到达的节奏不均匀，交给打字机匀到每一帧，每帧最多更新一次界面
   const typewriter = createTypewriter((text) => {
     live.content += text
@@ -235,14 +273,18 @@ async function streamReply(content, options) {
           }
           typewriter.push(text)
         },
-        done: (m) => {
-          typewriter.finish() // 没打完的立刻补齐，再换成存好的真消息
-          dropLive()
-          addMessages([m])
-        },
+        // 网络已经收完，但屏幕上的文字还在按节奏慢慢长：先记下真消息，等显示完再换
+        done: (m) => (final = m),
       },
       options, // { model, effort }：原样透传给后端
     )
+    await typewriter.drain() // 让用户把已收到的文字看完（切会话 / 出错会 cancel，等待随之结束）
+    if (final && live) {
+      finished.add(final.id) // 记下：这条回复刚长完，带着「完成态」效果留在列表里
+      typewriter.finish()
+      dropLive()
+      addMessages([final])
+    }
   } catch (e) {
     dropLive() // 流中途断了：去掉半截的临时消息；已存的消息以服务器为准，刷新就能看到
     throw e
@@ -263,16 +305,25 @@ onBeforeUnmount(() => closeStream && closeStream())
 <template>
   <div class="chat" :data-view="view">
     <aside class="sidebar">
-      <n-button type="primary" class="new" @click="newSession">新建会话</n-button>
+      <div class="brand"><ColourfulText text="Code Harness" :colors="BRAND_COLORS" start-color="#8a96a3" /></div>
+      <n-button type="primary" class="new" @click="newSession">
+        <template #icon><n-icon class="new-icon"><AddCircleOutline /></n-icon></template>
+        新建会话
+      </n-button>
+      <!-- 会话列表：逐项淡入（延迟随序号递增，最多错开 10 项，列表再长也不会等太久，借鉴 Inspira UI 的 Animated List） -->
       <div
-        v-for="s in sessions"
+        v-for="(s, i) in sessions"
         :key="s.id"
         class="session"
         :class="{ active: s.id === currentId }"
+        :style="{ animationDelay: `${Math.min(i, 10) * 40}ms` }"
         @click="selectSession(s.id); view = 'chat'"
       >
-        {{ s.title }}
-        <span class="time">{{ new Date(s.created_at).toLocaleString() }}</span>
+        <n-icon class="session-icon" :size="18"><component :is="s.id === currentId ? ChatbubbleEllipsesOutline : ChatbubbleOutline" /></n-icon>
+        <span class="session-text">
+          {{ s.title }}
+          <span class="time">{{ new Date(s.created_at).toLocaleString() }}</span>
+        </span>
       </div>
     </aside>
 
@@ -283,11 +334,12 @@ onBeforeUnmount(() => closeStream && closeStream())
         :key="f.view"
         circle
         class="fab"
+        :class="{ on: view === f.view }"
         :type="view === f.view ? 'primary' : 'default'"
         :title="f.title"
         @click="toggleView(f.view)"
       >
-        {{ f.icon }}
+        <n-icon class="fab-icon" :size="22"><component :is="f.icon" /></n-icon>
       </n-button>
     </div>
     <div class="fabs right">
@@ -296,11 +348,12 @@ onBeforeUnmount(() => closeStream && closeStream())
         :key="f.view"
         circle
         class="fab"
+        :class="{ on: view === f.view }"
         :type="view === f.view ? 'primary' : 'default'"
         :title="f.title"
         @click="toggleView(f.view)"
       >
-        {{ f.icon }}
+        <n-icon class="fab-icon" :size="22"><component :is="f.icon" /></n-icon>
       </n-button>
     </div>
 
@@ -308,9 +361,9 @@ onBeforeUnmount(() => closeStream && closeStream())
       <!-- 标签行：选择会话、切换到工作区 -->
       <div class="tabs">
         <n-tabs v-model:value="tab" class="tab-switch">
-          <n-tab-pane name="chat" display-directive="show"><template #tab>💬 会话</template></n-tab-pane>
-          <n-tab-pane name="workspace" display-directive="show"><template #tab>📁 工作区</template></n-tab-pane>
-          <n-tab-pane name="preview" display-directive="show"><template #tab>🌐 预览</template></n-tab-pane>
+          <n-tab-pane name="chat" display-directive="show"><template #tab><span class="tab-label"><n-icon><ChatbubbleEllipsesOutline /></n-icon>会话</span></template></n-tab-pane>
+          <n-tab-pane name="workspace" display-directive="show"><template #tab><span class="tab-label"><n-icon><FolderOpenOutline /></n-icon>工作区</span></template></n-tab-pane>
+          <n-tab-pane name="preview" display-directive="show"><template #tab><span class="tab-label"><n-icon><GlobeOutline /></n-icon>预览</span></template></n-tab-pane>
         </n-tabs>
         <n-select
           :value="currentId"
@@ -324,12 +377,18 @@ onBeforeUnmount(() => closeStream && closeStream())
 
       <PreviewPane ref="previewPane" v-show="tab === 'preview'" :links="previewLinks" />
       <WorkspaceBrowser v-if="tab === 'workspace'" :session-id="currentId" :target="openTarget" />
-      <div v-show="tab === 'chat'" ref="listEl" class="messages">
-        <div v-if="!messages.length" class="empty">发送第一条消息，开始对话</div>
-        <div v-for="m in messages" :key="m.id" class="row" :class="m.role">
+      <!-- 消息区外面包一层：流星雨铺在背景（不随消息滚动），消息列表在它上面滚动 -->
+      <div v-show="tab === 'chat'" class="messages-wrap">
+        <MeteorShower />
+      <div ref="listEl" class="messages">
+        <div v-if="!messages.length" class="empty">
+          <n-icon class="empty-icon" :size="56"><ChatbubblesOutline /></n-icon>
+          <div>发送第一条消息，开始对话</div>
+        </div>
+        <div v-for="m in messages" :key="m.id" class="row" :class="[m.role, { live: m.id === Infinity, settled: finished.has(m.id) }]">
           <div class="bubble">{{ m.content }}</div>
           <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
-          <EurekaBanner v-if="m.eureka" :text="m.eureka.text" />
+          <EurekaBanner v-if="m.eureka" :text="m.eureka.text" :style="gapStyle(m, 0)" />
           <!-- 文件变更：这一轮工作区有文件创建或变更；和 eureka 提示条一样，刷新后由后端带回来 -->
           <!-- 选中 skill：skill_selector 这一轮选中了插件/工作流；和文件变更提示条一样，刷新后由后端带回来 -->
           <SkillSelectionBanner
@@ -337,8 +396,9 @@ onBeforeUnmount(() => closeStream && closeStream())
             :text="m.skill_selection.text"
             :plugins="m.skill_selection.plugins"
             :workflows="m.skill_selection.workflows"
+            :style="gapStyle(m, 1)"
           />
-          <FileChangeBanner v-if="m.file_change" :text="m.file_change.text" :files="m.file_change.files" @open-file="openInWorkspace" />
+          <FileChangeBanner v-if="m.file_change" :text="m.file_change.text" :files="m.file_change.files" :style="gapStyle(m, 2)" @open-file="openInWorkspace" />
           <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
           <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
           <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->
@@ -348,6 +408,8 @@ onBeforeUnmount(() => closeStream && closeStream())
             :session-id="currentId"
             :run-id="m.eureka.run.id"
             :initial-status="m.eureka.run.status"
+            :style="gapStyle(m, 3)"
+            :gap="gapSeconds(m, 3)"
             @update="onRunUpdate"
             @finished="onRunFinished"
             @open-link="openInPreview"
@@ -357,6 +419,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         <div v-if="waitingId && waitingId === currentId" class="row assistant">
           <WaitingHint :key="waitingId" />
         </div>
+      </div>
       </div>
 
       <div v-show="tab === 'chat'" class="composer">
@@ -381,10 +444,12 @@ onBeforeUnmount(() => closeStream && closeStream())
             <ModelPicker v-model="modelChoice" :disabled="sending" />
             <n-button
               type="primary"
+              class="send"
               :loading="sending"
               :disabled="!draft.trim() && !pendingFile"
               @click="send"
             >
+              <template #icon><n-icon class="send-icon"><PaperPlaneOutline /></n-icon></template>
               {{ stage || '发送' }}
             </n-button>
           </div>
@@ -401,7 +466,7 @@ onBeforeUnmount(() => closeStream && closeStream())
         :title="rightCollapsed ? '展开插件和工作流' : '收起插件和工作流'"
         @click="rightCollapsed = !rightCollapsed"
       >
-        {{ rightCollapsed ? '‹' : '×' }}
+        <n-icon class="toggle-icon" :class="{ flip: rightCollapsed }"><ChevronForward /></n-icon>
       </n-button>
       <div v-show="!rightCollapsed" class="panels">
         <PluginPanel :session-id="currentId" :selected="lastSelection?.skill_selection.plugins" :selected-key="lastSelection?.id" />
@@ -458,22 +523,195 @@ onBeforeUnmount(() => closeStream && closeStream())
   border-right: 1px solid #e4e7ed;
   overflow-y: auto;
 }
+.brand {
+  margin-bottom: 12px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+/* 图标悬停：放大、轻微旋转并发光；尊重「减少动态效果」设置 */
+.fab-icon,
+.tab-label .n-icon {
+  transition: transform 0.25s ease, filter 0.25s ease;
+}
+.fab:hover .fab-icon,
+.tab-label:hover .n-icon {
+  transform: scale(1.25) rotate(-8deg);
+  filter: drop-shadow(0 0 6px #3d6b8c);
+}
+/* 收起按钮：箭头随收起 / 展开翻转；新建按钮的图标悬停时转一圈 */
+.toggle-icon,
+.new-icon {
+  transition: transform 0.35s ease, filter 0.25s ease;
+}
+.toggle-icon.flip {
+  transform: rotate(180deg);
+}
+.toggle:hover .toggle-icon {
+  transform: translateX(3px) scale(1.2);
+  filter: drop-shadow(0 0 5px #3d6b8c);
+}
+.toggle:hover .toggle-icon.flip {
+  transform: rotate(180deg) translateX(3px) scale(1.2);
+}
+.toggle:active .toggle-icon {
+  transform: scale(0.8);
+}
+.toggle:active .toggle-icon.flip {
+  transform: rotate(180deg) scale(0.8);
+}
+.new:hover .new-icon {
+  transform: rotate(90deg) scale(1.25);
+  filter: drop-shadow(0 0 5px #ffffff);
+}
+.new:active .new-icon {
+  transform: rotate(180deg) scale(0.8);
+}
+/* 发送按钮：悬停时纸飞机向右上飞出一点，按下时飞得更远并缩小；可发送时图标轻轻浮动，提示「可以点了」 */
+.send-icon {
+  transition: transform 0.25s ease;
+}
+.send:not(:disabled):hover .send-icon {
+  transform: translate(3px, -3px) rotate(-12deg) scale(1.15);
+}
+.send:not(:disabled):active .send-icon {
+  transform: translate(6px, -6px) scale(0.8);
+}
+.send:not(:disabled) .send-icon {
+  animation: send-float 2.4s ease-in-out infinite;
+}
+.send:not(:disabled):hover .send-icon {
+  animation: none;
+}
+@keyframes send-float {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(1.5px, -1.5px);
+  }
+}
+/* 触屏没有悬停：按下时弹一下，当前选中的按钮 / 标签图标持续轻微呼吸 */
+.fab:active .fab-icon,
+.tab-label:active .n-icon {
+  transform: scale(0.8) rotate(8deg);
+}
+.fab.on .fab-icon,
+:deep(.n-tabs-tab--active) .tab-label .n-icon {
+  animation: icon-breathe 2.4s ease-in-out infinite;
+}
+@keyframes icon-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 transparent);
+  }
+  50% {
+    transform: scale(1.18);
+    filter: drop-shadow(0 0 5px #3d6b8c);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .session,
+  .row,
+  .empty-icon,
+  .row.live .bubble::before,
+  .row.live .bubble::after,
+  .row.settled .bubble {
+    animation: none;
+  }
+  .session,
+  .session-icon {
+    transition: none;
+  }
+  .session:hover,
+  .session:active,
+  .session:hover .session-icon {
+    transform: none;
+  }
+  .fab-icon,
+  .toggle-icon,
+  .new-icon,
+  .send-icon,
+  .tab-label .n-icon {
+    transition: none;
+    animation: none !important;
+  }
+  .fab:hover .fab-icon,
+  .tab-label:hover .n-icon,
+  .fab:active .fab-icon,
+  .tab-label:active .n-icon,
+  .toggle:hover .toggle-icon,
+  .toggle:active .toggle-icon,
+  .new:hover .new-icon,
+  .new:active .new-icon,
+  .send:hover .send-icon,
+  .send:active .send-icon {
+    transform: none;
+  }
+  .send .send-icon {
+    animation: none !important;
+  }
+  .toggle-icon.flip {
+    transform: rotate(180deg) !important;
+  }
+}
 .new {
   width: 100%;
   margin-bottom: 16px;
 }
 .session {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 12px;
   border-radius: 4px;
   cursor: pointer;
   font-size: 14px;
+  animation: session-in 0.35s ease backwards; /* backwards：延迟期间先保持透明 */
+  transition: background 0.2s ease, transform 0.2s ease, color 0.2s ease;
+}
+@keyframes session-in {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
 }
 .session:hover {
-  background: #f5f7fa;
+  background: #eef2f6;
+  transform: translateX(3px);
+}
+.session:active {
+  transform: scale(0.98);
 }
 .session.active {
-  background: #ecf5ff;
-  color: #409eff;
+  background: linear-gradient(135deg, #e3edf5, #cfe0ee);
+  color: #1c2733;
+}
+.session.active .time {
+  color: #5b7387;
+}
+.session-text {
+  min-width: 0;
+}
+.session-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: #4f7f99;
+  transition: transform 0.25s ease, filter 0.25s ease;
+}
+.session:hover .session-icon {
+  transform: scale(1.2) rotate(-8deg);
+  filter: drop-shadow(0 0 4px #3d6b8c);
+}
+.session.active .session-icon {
+  color: #3d6b8c;
 }
 .time {
   display: block;
@@ -502,11 +740,28 @@ onBeforeUnmount(() => closeStream && closeStream())
 .tab-switch :deep(.n-tabs-nav) {
   border-bottom: none;
 }
+/* n-tabs 自带 width:100%，会和下拉框按比例一起收缩而重叠；改成按内容定宽、不收缩，由下拉框单独缩小 */
+.tab-switch {
+  flex: none;
+  width: auto;
+}
 .session-select {
-  width: 200px;
+  flex: 0 1 200px;
+  width: auto;
+  min-width: 0;
+}
+.messages-wrap {
+  position: relative; /* 流星雨绝对定位在它里面 */
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
 }
 .messages {
+  position: relative; /* 盖在流星雨上面 */
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 20px;
 }
@@ -514,6 +769,22 @@ onBeforeUnmount(() => closeStream && closeStream())
   text-align: center;
   color: #909399;
   margin-top: 48px;
+}
+/* 空会话的图标缓慢浮动（Inspira UI 的 Float 思路） */
+.empty-icon {
+  display: block;
+  margin: 0 auto 8px;
+  color: #4f7f99;
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-5deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(5deg);
+  }
 }
 .notice {
   align-self: flex-start;
@@ -531,6 +802,13 @@ onBeforeUnmount(() => closeStream && closeStream())
   flex-direction: column; /* 气泡在上，eureka 提示条（如果有）在下 */
   align-items: flex-start;
   margin-bottom: 16px;
+  animation: row-in 0.3s ease; /* 新消息出现时淡入上滑一次 */
+}
+@keyframes row-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
 }
 .row.user {
   align-items: flex-end;
@@ -547,8 +825,65 @@ onBeforeUnmount(() => closeStream && closeStream())
   contain: layout paint;
 }
 .row.user .bubble {
-  background: #409eff;
-  color: #fff;
+  background: linear-gradient(135deg, #e3edf5, #c9dcec);
+  color: #1c2733;
+}
+/* 流式输出中的那条回复（id 是 Infinity 的临时消息）：左边一道冷蓝色光条上下流动，末尾跟一个闪烁的光标
+   （借鉴 Inspira UI 的 Typewriter Text 光标和 Border Beam 的流光）。回复结束换成真消息后自动消失 */
+.row.live .bubble {
+  position: relative;
+  padding-left: 20px;
+}
+.row.live .bubble::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, #0b0f14, #4f7f99, #8fb3cc, #4f7f99, #0b0f14);
+  background-size: 100% 300%;
+  animation: stream-beam 2.4s linear infinite; /* 放慢：和放慢的出字节奏匹配 */
+}
+.row.live .bubble::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: #3d6b8c;
+  animation: stream-caret 1.2s steps(1) infinite;
+}
+/* 输出完成后的样子：定格成一条稳定的冷蓝边 + 浅冷蓝底。这是所有模型回复的常驻样式（不靠前端记忆），
+   所以刷新页面、切换会话、从别的页面回来，历史回复都保持这个效果；流式中的临时消息（.live）除外，它有自己的流光 */
+.row.assistant:not(.live) .bubble {
+  position: relative;
+  padding-left: 20px;
+  box-shadow: inset 4px 0 0 #4f7f99, 0 0 0 1px rgba(79, 127, 153, 0.25), 0 2px 10px rgba(61, 107, 140, 0.18);
+  background: linear-gradient(135deg, #f4f7fa, #e9f0f6);
+}
+/* 只有刚流式输出完的那条（settled）才播一次「落定」闪光；动画结束后回到上面的常驻样式 */
+.row.settled .bubble {
+  animation: settle 0.8s ease;
+}
+@keyframes settle {
+  0% {
+    box-shadow: inset 4px 0 0 #8fb3cc, 0 0 0 1px rgba(143, 179, 204, 0.8), 0 0 18px rgba(143, 179, 204, 0.9);
+  }
+  100% {
+    box-shadow: inset 4px 0 0 #4f7f99, 0 0 0 1px rgba(79, 127, 153, 0.25), 0 2px 10px rgba(61, 107, 140, 0.18);
+  }
+}
+@keyframes stream-beam {
+  to {
+    background-position: 0 300%;
+  }
+}
+@keyframes stream-caret {
+  50% {
+    opacity: 0;
+  }
 }
 .composer {
   container: composer / inline-size; /* 子组件按输入区自身的宽度压缩（中间栏宽度取决于两侧栏，不能看屏幕宽度） */
@@ -668,6 +1003,15 @@ onBeforeUnmount(() => closeStream && closeStream())
   }
   .messages {
     padding: 12px;
+  }
+  /* 触屏没有悬停，点一下后 :hover 会「粘住」：会话项不再做悬停位移 */
+  .session:hover {
+    transform: none;
+  }
+  /* 回复气泡左边的光边占位收小，窄屏上文字区才不被挤 */
+  .row.assistant .bubble,
+  .row.live .bubble {
+    padding-left: 14px;
   }
   /* 输入区贴底时避开 iPhone 底部横条 */
   .composer {

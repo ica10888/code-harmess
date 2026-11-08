@@ -101,6 +101,7 @@ git push
 - 不要运行 `npm run dev` 等长期进程作为后台任务，告知用户手动执行
 - 修改 models 后必须重新执行 `makemigrations` + `migrate`
 - WebFetch 使用代理 http://127.0.0.1:7890
+- 前端动效组件按需从 Inspira UI（基于 shadcn-vue、motion-v、TailwindCSS 的 Vue 组件库）复制引入，不整体安装；查文档先读 https://inspira-ui.com/llms.txt，再按其中链接取 `raw/en/components/<分类>/<名称>.md`（需走代理 127.0.0.1:7890，WebFetch 被拦时用 curl）。
 
 
 

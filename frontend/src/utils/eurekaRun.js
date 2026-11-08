@@ -54,3 +54,14 @@ export function extractLinks(run) {
     for (const line of stage.logs ?? []) for (const part of splitLinks(line)) if (part.href) links.add(part.href)
   return [...links]
 }
+
+/**
+ * 工作流完成后，等多久再跳转到预览页（毫秒）：要等面板的动画播完，否则动画还没看到就被切走了。
+ * gapSeconds 是面板的入场延迟（--gap），stageCount 是阶段数；各段时长对应 EurekaRunPanel 的样式：
+ * 入场 0.5 秒 + 阶段依次滑入（每个错开 0.1 秒、各 0.4 秒）+ 完成态图标弹出 0.45 秒，最后留 0.6 秒让人看清结果。
+ */
+export function jumpDelayMs(gapSeconds, stageCount) {
+  const gap = Number.isFinite(gapSeconds) && gapSeconds > 0 ? gapSeconds : 0
+  const stages = Number.isFinite(stageCount) && stageCount > 0 ? stageCount : 0
+  return Math.round((gap + 0.5 + stages * 0.1 + 0.4 + 0.45 + 0.6) * 1000)
+}

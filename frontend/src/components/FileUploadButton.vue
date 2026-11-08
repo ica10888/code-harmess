@@ -47,7 +47,7 @@ function onDrop(event) {
       <n-tooltip placement="top">
         <template #trigger>
           <n-button class="square" :disabled="disabled" aria-label="选择文件">
-            <template #icon><n-icon><Add /></n-icon></template>
+            <template #icon><n-icon class="add-icon"><Add /></n-icon></template>
           </n-button>
         </template>
         选择文件（仅文件，不支持文件夹）
@@ -58,7 +58,7 @@ function onDrop(event) {
       <span class="name">{{ file.name }}</span>
       <span class="size">{{ formatSize(file.size) }}</span>
       <n-button text :disabled="disabled" aria-label="移除文件" @click="file = null">
-        <template #icon><n-icon><Close /></n-icon></template>
+        <template #icon><n-icon class="close-icon"><Close /></n-icon></template>
       </n-button>
     </span>
   </div>
@@ -80,6 +80,32 @@ function onDrop(event) {
   width: 34px;
   padding: 0;
   flex-shrink: 0; /* 空间再紧也不能把「+」压扁 */
+}
+/* 「+」悬停转 90° 并发光，按下缩小；移除的「×」悬停转 90° */
+.add-icon,
+.close-icon {
+  transition: transform 0.3s ease, filter 0.25s ease;
+}
+.square:hover .add-icon {
+  transform: rotate(90deg) scale(1.25);
+  filter: drop-shadow(0 0 5px #3d6b8c);
+}
+.square:active .add-icon {
+  transform: rotate(90deg) scale(0.8);
+}
+.chosen :deep(.n-button:hover) .close-icon {
+  transform: rotate(90deg) scale(1.2);
+}
+@media (prefers-reduced-motion: reduce) {
+  .add-icon,
+  .close-icon {
+    transition: none;
+  }
+  .square:hover .add-icon,
+  .square:active .add-icon,
+  .chosen :deep(.n-button:hover) .close-icon {
+    transform: none;
+  }
 }
 .chosen {
   flex: 0 1 auto; /* 可以收缩 */

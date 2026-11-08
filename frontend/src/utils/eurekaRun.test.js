@@ -1,7 +1,7 @@
 // eureka 工作流进度的前端逻辑：node --test，不需要浏览器。
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFinished, progressSummary, stageIcon, shouldPoll, nextDelay, STATUS_LABEL, extractLinks } from './eurekaRun.js'
+import { isFinished, progressSummary, stageIcon, shouldPoll, nextDelay, STATUS_LABEL, extractLinks, jumpDelayMs } from './eurekaRun.js'
 
 const stage = (key, status, extra = {}) => ({ key, title: key.toUpperCase(), status, error: '', logs: [], ...extra })
 const run = (status, stages) => ({ id: 1, plugin: 'code-review', status, error: '', stages })
@@ -78,4 +78,17 @@ test('extractLinks：按出现顺序收集所有阶段日志里的链接，去�
   }
   assert.deepEqual(extractLinks(run), ['http://127.0.0.1:5200', 'https://a.com/x'])
   assert.deepEqual(extractLinks(null), [])
+})
+
+test('jumpDelayMs：工作流完成后，等面板动画播完再跳转', () => {
+  // 面板入场延迟 gap 秒 + 入场动画 + 阶段依次滑入 + 完成态的收尾，再留一小会儿让人看清
+  const base = jumpDelayMs(0, 3)
+  assert.ok(base > 0)
+  assert.equal(jumpDelayMs(1.2, 3) - base, 1200) // 入场延迟越长，等得越久
+  assert.ok(jumpDelayMs(0, 5) > jumpDelayMs(0, 3)) // 阶段越多，滑入动画越长
+})
+
+test('jumpDelayMs：不认识的参数当成 0，不会得到 NaN', () => {
+  assert.ok(Number.isFinite(jumpDelayMs(undefined, undefined)))
+  assert.ok(Number.isFinite(jumpDelayMs(NaN, -1)))
 })

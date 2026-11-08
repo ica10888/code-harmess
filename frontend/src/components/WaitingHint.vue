@@ -2,6 +2,8 @@
 // 等待模型回复时的占位：随机挑一个词，一个字一个字露出来，再露出 "..."（渐进式披露）；
 // 露完停一会儿，换一个词从头再来，一直循环，直到父组件在第一段回复到来时移除它。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { NIcon } from 'naive-ui'
+import { SparklesOutline } from '@vicons/ionicons5'
 import { pickWord, revealStep, totalSteps } from '../utils/waitingWord'
 
 const STEP_MS = 70
@@ -26,11 +28,16 @@ onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="waiting" role="status" aria-live="polite">{{ text }}</div>
+  <div class="waiting" role="status" aria-live="polite">
+    <n-icon class="spark" :size="16"><SparklesOutline /></n-icon>{{ text }}
+  </div>
 </template>
 
 <style scoped>
 .waiting {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   max-width: 70%;
   min-height: 1.5em;
   padding: 8px 16px;
@@ -39,6 +46,23 @@ onBeforeUnmount(() => clearInterval(timer))
   color: #909399;
   font-style: italic;
   line-height: 1.5;
+}
+/* 闪烁图标：缓慢旋转并明暗呼吸，表示模型正在想 */
+.spark {
+  flex-shrink: 0;
+  color: #4f7f99;
+  animation: spark 1.6s ease-in-out infinite;
+}
+@keyframes spark {
+  50% {
+    transform: scale(1.3) rotate(20deg);
+    opacity: 0.5;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spark {
+    animation: none;
+  }
 }
 @media (max-width: 768px) {
   .waiting {

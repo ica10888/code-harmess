@@ -2,7 +2,8 @@
 // 预览标签：把工作流日志里的超链接页面内嵌进来（iframe）。每个链接一个浏览器式的小标签，可切换；有刷新和新标签页打开。
 import { computed, ref, watch } from 'vue'
 import { NButton, NIcon, NInput } from 'naive-ui'
-import { RefreshOutline } from '@vicons/ionicons5'
+import { motion } from 'motion-v'
+import { CloseOutline, CompassOutline, GlobeOutline, LinkOutline, OpenOutline, ReloadOutline } from '@vicons/ionicons5'
 
 const props = defineProps({ links: { type: Array, default: () => [] } })
 
@@ -51,7 +52,12 @@ function open(link) {
 }
 defineExpose({ open })
 
-const refresh = () => (reloads.value[selected.value] = (reloads.value[selected.value] ?? 0) + 1)
+const spinning = ref(false) // 刷新图标转一圈：点一下就转，转完（0.6 秒）复位
+function refresh() {
+  reloads.value[selected.value] = (reloads.value[selected.value] ?? 0) + 1
+  spinning.value = true
+  setTimeout(() => (spinning.value = false), 600)
+}
 
 // 被嵌页面和本页面同源时，不能同时给 allow-scripts 和 allow-same-origin，否则它能摘掉沙箱；跨源则可以，页面才能正常用 localStorage 等
 function sandboxFor(link) {
@@ -66,7 +72,10 @@ function sandboxFor(link) {
 
 <template>
   <div class="preview-pane">
-    <div v-if="!tabs.length" class="empty">工作流日志里出现超链接后，页面会显示在这里</div>
+    <div v-if="!tabs.length" class="empty">
+      <n-icon class="empty-icon" :size="48"><CompassOutline /></n-icon>
+      <div>工作流日志里出现超链接后，页面会显示在这里</div>
+    </div>
     <template v-else>
       <!-- 浏览器式标签行：每个链接一个，点击切换；页面都保持加载，切换不丢状态 -->
       <div class="browser-tabs" role="tablist">
@@ -81,17 +90,32 @@ function sandboxFor(link) {
           @click="selected = l"
           @auxclick.middle.prevent="close(l)"
         >
+          <!-- 选中块：所有标签共用同一个 layout-id，切换时 motion-v 让它滑到新标签上（借鉴 Inspira UI 的 Animated Tabs） -->
+          <motion.span
+            v-if="l === selected"
+            layout-id="preview-pill"
+            class="pill"
+            :transition="{ type: 'spring', stiffness: 400, damping: 32 }"
+          />
+          <n-icon class="globe"><GlobeOutline /></n-icon>
           <span class="name">{{ tabTitle(l) }}</span>
-          <button type="button" class="x" :aria-label="`关闭 ${tabTitle(l)}`" @click.stop="close(l)">×</button>
+          <button type="button" class="x" :aria-label="`关闭 ${tabTitle(l)}`" @click.stop="close(l)">
+            <n-icon><CloseOutline /></n-icon>
+          </button>
         </div>
       </div>
       <div class="bar">
-        <n-button size="small" title="刷新当前页面" @click="refresh">
-          <template #icon><n-icon><RefreshOutline /></n-icon></template>
+        <n-button size="small" class="act refresh" title="刷新当前页面" @click="refresh">
+          <template #icon><n-icon :class="{ spin: spinning }"><ReloadOutline /></n-icon></template>
           刷新
         </n-button>
-        <n-input :value="selected" size="small" readonly class="url" />
-        <n-button size="small" tag="a" :href="selected" target="_blank" rel="noopener noreferrer">新标签页打开</n-button>
+        <n-input :value="selected" size="small" readonly class="url">
+          <template #prefix><n-icon><LinkOutline /></n-icon></template>
+        </n-input>
+        <n-button size="small" class="act open" tag="a" :href="selected" target="_blank" rel="noopener noreferrer">
+          <template #icon><n-icon><OpenOutline /></n-icon></template>
+          新标签页打开
+        </n-button>
       </div>
       <div class="frames">
         <iframe
@@ -134,19 +158,42 @@ function sandboxFor(link) {
   border-bottom: 1px solid #e4e7ed;
 }
 .btab {
+  position: relative; /* 选中块（.pill）绝对定位在它里面 */
   display: flex;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
   max-width: 240px;
-  padding: 6px 8px 6px 14px;
-  border: 1px solid transparent;
-  border-bottom: none;
+  padding: 6px 8px 6px 12px;
   border-radius: 6px 6px 0 0;
-  background: #f5f7fa;
   color: #606266;
   font-size: 12px;
   cursor: pointer;
+  transition: color 0.2s ease, background 0.2s ease;
+}
+.btab:not(.active):hover {
+  background: #eef2f6;
+  color: #2f4a63;
+}
+/* 选中块：浅冷蓝渐变，滑动靠 motion-v */
+.pill {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: 6px 6px 0 0;
+  background: linear-gradient(135deg, #e3edf5, #c9dcec);
+}
+.globe,
+.name,
+.x {
+  position: relative;
+  z-index: 1; /* 盖在选中块上面 */
+}
+.globe {
+  transition: transform 0.3s ease;
+}
+.btab:hover .globe {
+  transform: rotate(20deg) scale(1.2);
 }
 .name {
   overflow: hidden;
@@ -162,23 +209,74 @@ function sandboxFor(link) {
   border-radius: 50%;
   background: none;
   color: inherit;
-  font-size: 14px;
-  line-height: 16px;
+  font-size: 12px;
   cursor: pointer;
 }
+.x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.25s ease, background 0.2s ease;
+}
 .x:hover {
-  background: #dcdfe6;
-  color: #303133;
+  background: rgba(127, 140, 153, 0.35);
+  transform: rotate(90deg);
 }
 .btab.active {
-  border-color: #e4e7ed;
-  background: #fff;
-  color: #409eff;
-  position: relative;
-  top: 1px; /* 盖住下面那条分隔线，看起来和页面连在一起 */
+  color: #1c2733;
 }
 .bar {
   margin: 8px 0;
+}
+/* 刷新图标点击转一圈；新标签页图标悬停时向右上飘出一点 */
+.spin {
+  animation: spin 0.6s ease;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.open :deep(.n-icon) {
+  transition: transform 0.25s ease;
+}
+.open:hover :deep(.n-icon) {
+  transform: translate(2px, -2px) scale(1.15);
+}
+.refresh:hover :deep(.n-icon) {
+  filter: drop-shadow(0 0 4px #3d6b8c);
+}
+/* 空状态的指南针图标缓慢上下浮动（Inspira UI 的 Float 思路） */
+.empty-icon {
+  display: block;
+  margin: 0 auto 8px;
+  color: #4f7f99;
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-6deg);
+  }
+  50% {
+    transform: translateY(-8px) rotate(6deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .empty-icon {
+    animation: none;
+  }
+  .globe,
+  .x,
+  .open :deep(.n-icon) {
+    transition: none;
+  }
+  .btab:hover .globe,
+  .x:hover,
+  .open:hover :deep(.n-icon) {
+    transform: none;
+  }
 }
 .frames {
   flex: 1;
@@ -206,6 +304,12 @@ function sandboxFor(link) {
   margin-top: 6px;
 }
 @container (max-width: 520px) {
+  .act :deep(.n-button__content) {
+    display: none; /* 按钮只留图标，地址栏才有地方 */
+  }
+  .act :deep(.n-button__icon) {
+    margin: 0;
+  }
   .bar {
     flex-wrap: wrap;
   }
