@@ -12,7 +12,8 @@ from unittest import mock
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps.models import SkillSelection
+from apps import services
+from apps.models import ChatSession, SkillSelection
 from apps.test_eureka import GOOD, PLUGIN, flow
 from apps.test_harness import FakeProvider, picks, sse_events, text
 
@@ -121,3 +122,43 @@ class SkillSelectionTests(TestCase):
         assistant = self.send(picks(), text("好的"), content="随便聊聊")[1]
 
         assert assistant["skill_selection"] is None
+
+
+class SkillsEventTests(TestCase):
+    def test_streaming_pushes_the_hint_as_soon_as_the_skill_is_selected_before_any_reply_text(self):
+        client = APIClient()
+        sid = client.post("/api/sessions/", {}, format="json").json()["id"]
+        with mock.patch("apps.harness.get_provider", return_value=SelectingProvider(picks("code-review"), text(GOOD))):
+            res = client.post(f"/api/sessions/{sid}/messages/stream/", {"content": "请审查"}, format="json")
+            events = sse_events(res)
+
+        names = [e for e, _ in events]
+        assert "skills" in names and names.index("skills") < names.index("delta")  # 比第一段回复文字还早
+        payload = dict(events)["skills"]
+        assert payload["plugins"] == ["code-review"] and "code-review" in payload["text"]
+        assert payload == {k: events[-1][1]["skill_selection"][k] for k in payload}  # 和最后存下的是同一份
+
+    def test_the_pending_hint_is_saved_on_the_session_until_the_reply_is_stored(self):
+        """回复还没存时刷新页面：提示在会话上能取回；回复存好后清空，由消息自己带着。"""
+        client = APIClient()
+        sid = client.post("/api/sessions/", {}, format="json").json()["id"]
+        session = ChatSession.objects.get(pk=sid)
+        with mock.patch("apps.harness.get_provider", return_value=SelectingProvider(picks("code-review"), text(GOOD))):
+            events = services.stream_user_message(session, "请审查")
+            while next(events)[0] != "skills":
+                pass
+            saved = ChatSession.objects.get(pk=sid).pending_selection
+            assert saved["plugins"] == ["code-review"]
+            assert client.get("/api/sessions/").json()[0]["pending_selection"] == saved  # 刷新后列表接口带回
+            events.close()  # 模拟页面刷新：客户端断开，服务端把这一轮收尾
+        assert ChatSession.objects.get(pk=sid).pending_selection is None
+        assert client.get(f"/api/sessions/{sid}/messages/").json()[-1]["skill_selection"]["plugins"] == ["code-review"]
+
+    def test_nothing_selected_pushes_no_skills_event(self):
+        client = APIClient()
+        sid = client.post("/api/sessions/", {}, format="json").json()["id"]
+        with mock.patch("apps.harness.get_provider", return_value=SelectingProvider(picks(), text("好的"))):
+            res = client.post(f"/api/sessions/{sid}/messages/stream/", {"content": "聊聊"}, format="json")
+            events = sse_events(res)
+
+        assert "skills" not in [e for e, _ in events]

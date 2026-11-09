@@ -909,7 +909,12 @@ def test_no_select_skills_flag_turns_it_off():
 def test_a_skill_already_in_the_conversation_is_not_injected_again(tmp_path):
     skills = [_skill(tmp_path, "alpha", "ALPHA-BODY")]
     provider = SelectingProvider(
-        [Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["one"]), Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["two"])]
+        [
+            Reply(texts=['{"skills": ["alpha"]}']),
+            Reply(texts=["one"]),
+            Reply(texts=['{"skills": ["alpha"]}']),
+            Reply(texts=["two"]),
+        ]
     )
     agent = Agent(provider, [], scripted(), skills=skills)
 
@@ -939,7 +944,12 @@ def test_respond_calls_extra_context_with_the_selected_names_and_appends_its_mes
 def test_extra_context_is_asked_even_when_the_skill_is_already_in_the_conversation(tmp_path):
     skills = [_skill(tmp_path, "alpha", "ALPHA-BODY")]
     provider = SelectingProvider(
-        [Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["one"]), Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["two"])]
+        [
+            Reply(texts=['{"skills": ["alpha"]}']),
+            Reply(texts=["one"]),
+            Reply(texts=['{"skills": ["alpha"]}']),
+            Reply(texts=["two"]),
+        ]
     )
     seen = []
     agent = Agent(provider, [], scripted(), skills=skills)
@@ -981,8 +991,12 @@ def test_respond_reports_the_selected_skill_names_in_the_answer_even_if_already_
 def test_answer_selected_is_empty_when_selection_is_off_or_nothing_is_picked(tmp_path):
     skills = [_skill(tmp_path, "alpha", "A")]
 
-    off = Agent(SelectingProvider([Reply(texts=["x"])]), [], scripted(), skills=skills, select_skills=False).respond("a")
-    none = Agent(SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["x"])]), [], scripted(), skills=skills).respond("a")
+    off = Agent(SelectingProvider([Reply(texts=["x"])]), [], scripted(), skills=skills, select_skills=False).respond(
+        "a"
+    )
+    none = Agent(
+        SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["x"])]), [], scripted(), skills=skills
+    ).respond("a")
 
     assert off.selected == [] and none.selected == []
 
@@ -1020,7 +1034,10 @@ def test_counter_records_request_and_tool_stats(tmp_path):
     assert [(r.input_tokens, r.output_tokens) for r in requests] == [(0, 0), (10, 3)]  # 没有 usage 记 0
     assert all(r.seconds >= 0 for r in requests)
     tools = agent.counter.tool_stats
-    assert [(t.name, t.files_read, t.files_written) for t in tools] == [("read_file", 1, 0), ("nope", 0, 0)]  # 失败的不算文件
+    assert [(t.name, t.files_read, t.files_written) for t in tools] == [
+        ("read_file", 1, 0),
+        ("nope", 0, 0),
+    ]  # 失败的不算文件
 
 
 def test_counter_records_turn_stats(tmp_path):
@@ -1084,8 +1101,53 @@ def test_failed_skill_selection_request_is_not_recorded(tmp_path):
                 raise RuntimeError("boom")
             return super().chat(conversation, tools, system, **kw)
 
-    agent = Agent(Broken([Reply(texts=["done"])]), [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+    agent = Agent(
+        Broken([Reply(texts=["done"])]), [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True
+    )
 
     agent.respond("hi")
 
     assert len(agent.counter.request_stats) == 1  # 只有正式请求
+
+
+def test_counter_notifies_listener_as_each_request_and_tool_happens(tmp_path):
+    """每记一条请求 / 工具就通知一次（不是整轮结束后才一次），顺序就是发生顺序。"""
+    f = tmp_path / "s.txt"
+    f.write_text("x")
+    provider = FakeProvider([Reply(tool_calls=[ToolCall("c1", "read_file", {"path": str(f)})]), Reply(texts=["done"])])
+    agent = Agent(provider, [read_file], scripted(), select_skills=False)
+    seen = []
+    agent.counter.listener = lambda kind, stat: seen.append(
+        (kind, len(agent.counter.request_stats), len(agent.counter.tool_stats))
+    )
+
+    agent.respond("go")
+
+    assert seen == [("request", 1, 0), ("tool", 1, 1), ("request", 2, 1), ("turn", 2, 1)]
+
+
+def test_respond_reports_selected_skills_right_after_selection_before_the_formal_request(tmp_path):
+    """选完 skill 就回调 on_skills（正式请求之前），不用等整轮结束。"""
+    events = []
+
+    class Recording(SelectingProvider):
+        def chat(self, conversation, tools, system="", **kw):
+            events.append("request")
+            return super().chat(conversation, tools, system, **kw)
+
+    provider = Recording([Reply(texts=['{"skills": ["alpha"]}']), Reply(texts=["done"])])
+    agent = Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+
+    agent.respond("go", on_skills=lambda names: events.append(("skills", names)))
+
+    assert events == ["request", ("skills", ["alpha"]), "request"]  # 选择请求 → 回调 → 正式请求
+
+
+def test_respond_does_not_report_when_no_skill_is_selected(tmp_path):
+    seen = []
+    provider = SelectingProvider([Reply(texts=['{"skills": []}']), Reply(texts=["done"])])
+    agent = Agent(provider, [], scripted(), skills=[_skill(tmp_path, "alpha", "A")], select_skills=True)
+
+    agent.respond("go", on_skills=seen.append)
+
+    assert seen == []

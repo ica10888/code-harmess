@@ -69,6 +69,9 @@ def save_assistant_message(session: ChatSession, reply: str) -> Message:
     判定出任何问题都只是「没有 eureka」，绝不影响回复本身。
     """
     message = Message.objects.create(session=session, role="assistant", content=reply)
+    if session.pending_selection is not None:  # 回复已存，提示改由这条消息自己带着（SkillSelection）
+        session.pending_selection = None
+        session.save(update_fields=["pending_selection"])
     try:
         from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
 
@@ -106,6 +109,16 @@ def _joined(names: list[str]) -> str:
     return names[0] if len(names) == 1 else "、".join(names[:-1]) + " 和 " + names[-1]
 
 
+def skill_selection_payload(session: ChatSession, plugins: list[str]) -> dict:
+    """选中 skill 的提示内容 {"text", "plugins", "workflows"}：选中的那一刻推给前端、轮结束时存库，用的是同一份。"""
+    from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
+
+    flows = [name for name in plugins if workflows.workflow_for(session, name)]
+    template = DEFAULT_SKILL_SELECTION_WORKFLOW_TEXT if flows else DEFAULT_SKILL_SELECTION_TEXT
+    text = template.format(plugins=_joined(plugins), workflows=_joined(flows) if flows else "")
+    return {"text": text, "plugins": plugins, "workflows": flows}
+
+
 def save_skill_selection(session: ChatSession, message: Message) -> SkillSelection | None:
     """skill_selector 这一轮选中了 skill，就存一条 SkillSelection 挂在 message 上；工作流是其中有同名工作流的那些。
 
@@ -116,12 +129,7 @@ def save_skill_selection(session: ChatSession, message: Message) -> SkillSelecti
     session.selected_skills = []
     if not plugins:
         return None
-    from . import workflows  # 放在函数里：workflows 要用本文件的 PluginError 等，顶层互相导入会循环
-
-    flows = [name for name in plugins if workflows.workflow_for(session, name)]
-    template = DEFAULT_SKILL_SELECTION_WORKFLOW_TEXT if flows else DEFAULT_SKILL_SELECTION_TEXT
-    text = template.format(plugins=_joined(plugins), workflows=_joined(flows) if flows else "")
-    return SkillSelection.objects.create(message=message, text=text, plugins=plugins, workflows=flows)
+    return SkillSelection.objects.create(message=message, **skill_selection_payload(session, plugins))
 
 
 DEFAULT_FILE_CHANGE_TEXT = "📝 有文件变更"
@@ -265,22 +273,51 @@ def stream_user_message(session: ChatSession, user_text: str, model: str | None 
     title   会话的第一句话到来时，改好的会话标题 {"title": ...}
     user    存好的用户消息（前端用它替换自己先显示的那条）
     delta   模型刚吐出的一段文字 {"text": ...}
+    skills  skill_selector 选中了 skill 的那一刻 {"text", "plugins", "workflows"}（和之后 done 里的 skill_selection 同一份）
+    stats   每次请求、每次工具调用、每轮结束时：会话最新的 {"request_count", "turn_count", "tool_count"}
     done    存好的完整 assistant 消息（前端用它替换正在长出来的气泡）
     调用模型失败时不抛异常：把原因当作回复存下来，照样以 done 结束。
     """
     title = name_session_from_first_message(session, user_text)  # 必须在存用户消息之前：靠“还没有消息”判断
     if title:
         yield "title", {"title": title}
-    yield "user", MessageSerializer(Message.objects.create(session=session, role="user", content=user_text)).data
+    user_message = Message.objects.create(session=session, role="user", content=user_text)
+    stream = harness.stream_turn(session, user_text, model, effort)
+    disconnected = False
     try:
-        for kind, data in harness.stream_turn(session, user_text, model, effort):
+        yield "user", MessageSerializer(user_message).data
+        for kind, data in stream:
             if kind == "delta":
                 yield "delta", {"text": data}
+            elif kind == "stats":
+                yield "stats", data
+            elif kind == "skills":
+                # skill_selector 刚选完（正式请求之前）：马上推提示，不等整轮结束；轮结束后消息里仍带它，刷新后还在
+                try:
+                    payload = skill_selection_payload(session, data)
+                    session.pending_selection = payload  # 先存起来：这时刷新页面，回复存好之前也能恢复提示
+                    session.save(update_fields=["pending_selection"])
+                    yield "skills", payload
+                except Exception:
+                    logging.getLogger(__name__).exception("推送选中 skill 提示失败，已忽略")
             else:
                 reply = data
+    except GeneratorExit:
+        # 客户端中途断开（刷新页面、关标签）：模型线程不会停，所以把剩下的流收完，回复、计数、skill 提示照样存下来，
+        # 不然库里只剩一条用户消息，统计也是 0
+        disconnected = True
+        try:
+            for kind, data in stream:
+                if kind == "done":
+                    reply = data
+        except Exception as e:
+            reply = f"调用模型失败：{e}"
     except Exception as e:
         reply = f"调用模型失败：{e}"
-    yield "done", MessageSerializer(save_assistant_message(session, reply)).data
+    saved = save_assistant_message(session, reply)
+    if disconnected:
+        raise GeneratorExit  # 生成器被关闭后不能再 yield，保存完照常结束
+    yield "done", MessageSerializer(saved).data
 
 
 class UploadError(Exception):
@@ -531,7 +568,7 @@ def session_stats(session: ChatSession) -> dict:
     t = session.tool_stats.aggregate(
         seconds=Avg("seconds"), files_read=Avg("files_read"), files_written=Avg("files_written")
     )
-    n = session.turn_stats.aggregate(seconds=Avg("seconds"), requests=Avg("requests"), tools=Avg("tools"))
+    n = session.turn_stats.filter(finished=True).aggregate(seconds=Avg("seconds"), requests=Avg("requests"), tools=Avg("tools"))
     return {
         "turn": {"avg_seconds": n["seconds"], "avg_requests": n["requests"], "avg_tools": n["tools"]},
         "request": {
@@ -551,27 +588,33 @@ STATS_DETAIL_LIMIT = 200  # 明细每类最多返回最近多少条
 
 
 def session_stats_detail(session: ChatSession) -> dict:
-    """会话统计的明细：每个轮一行（最近的在前），行里带着这一轮的请求和工具记录，保存了什么字段就返回什么。"""
+    """会话统计的明细：每个轮一行（最近的在前），行里带着这一轮的请求和工具记录，保存了什么字段就返回什么。
+
+    进行中的轮（finished=False）也在里面：次数还没回填，就按已经挂上来的记录数算。
+    """
     turns = session.turn_stats.order_by("-id").prefetch_related("request_stats", "tool_stats")[:STATS_DETAIL_LIMIT]
-    return {
-        "turns": [
+    rows = []
+    for t in turns:
+        request_list = [
+            {"id": r.id, "seconds": r.seconds, "input_tokens": r.input_tokens, "output_tokens": r.output_tokens}
+            for r in t.request_stats.all()
+        ]
+        tool_list = [
+            {"id": x.id, "name": x.name, "seconds": x.seconds, "files_read": x.files_read, "files_written": x.files_written, "paths": x.paths}
+            for x in t.tool_stats.all()
+        ]
+        rows.append(
             {
                 "id": t.id,
                 "seconds": t.seconds,
-                "requests": t.requests,
-                "tools": t.tools,
-                "request_list": [
-                    {"id": r.id, "seconds": r.seconds, "input_tokens": r.input_tokens, "output_tokens": r.output_tokens}
-                    for r in t.request_stats.all()
-                ],
-                "tool_list": [
-                    {"id": x.id, "name": x.name, "seconds": x.seconds, "files_read": x.files_read, "files_written": x.files_written, "paths": x.paths}
-                    for x in t.tool_stats.all()
-                ],
+                "finished": t.finished,
+                "requests": t.requests if t.finished else len(request_list),
+                "tools": t.tools if t.finished else len(tool_list),
+                "request_list": request_list,
+                "tool_list": tool_list,
             }
-            for t in turns
-        ]
-    }
+        )
+    return {"turns": rows}
 
 
 def request_stat_content(session: ChatSession, request_id: int) -> dict | None:

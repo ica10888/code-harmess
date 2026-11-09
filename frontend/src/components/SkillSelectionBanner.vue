@@ -42,7 +42,7 @@ defineProps({
   position: relative;
   align-self: flex-start;
   max-width: 70%;
-  margin-top: 6px;
+  margin-bottom: 6px; /* 提示条在回复气泡的上面（skill_selector 在回复之前触发） */
   padding: 8px 14px;
   border-radius: 8px;
   border: 1px solid #c2e7b0;

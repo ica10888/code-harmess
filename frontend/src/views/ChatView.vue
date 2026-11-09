@@ -56,6 +56,13 @@ const stage = ref('') // 发送过程中给用户看的一句话（比如「上�
 const modelChoice = ref(null) // 选的模型和推理强度 { model, effort }；选项还没加载出来时是 null
 const sending = ref(false)
 const finished = reactive(new Set()) // 刚流式输出完的回复 id：气泡保留「完成态」的光边（刷新页面后不再有）
+// 每个会话「一轮结束」的次数：传给统计弹窗，变了就重取平均值和明细（计数文字在轮结束时不变，靠它触发）
+const statsVersion = reactive({})
+const bumpStats = (id) => (statsVersion[id] = (statsVersion[id] || 0) + 1)
+const pendingSelection = ref(null) // 刚选中 skill 还没存库的提示 {sessionId, ...}；回复存好后由消息自带的 skill_selection 接管
+// 当前会话里该显示的临时提示条（别的会话的不显示）；有正在长的回复时画在那条回复里，没有就单独画一行（见模板）
+const shownPending = computed(() => (pendingSelection.value?.sessionId === currentId.value ? pendingSelection.value : null))
+const hasLive = computed(() => messages.value.some((m) => m.id === Infinity))
 const waitingId = ref(null) // 正在等回复的会话 id；等到第一段回复（或出错）就清空
 // 没写文字、但上传了文件时，用这句话代替，让模型照着去做
 const DEFAULT_TEXT = '请根据我上传的文件开始。'
@@ -95,12 +102,13 @@ let closeStream = null
 // 离底部不到这个距离，就认为用户正跟着看最新内容；超过了说明在往上翻，不能把页面拽回去
 const STICK_TO_BOTTOM_PX = 80
 
-// 回复下面的四个提示框（eureka、选用插件、文件变更、工作流）不一起蹦出来，而是按顺序一个接一个：
+// 回复下面的三个提示框（eureka、文件变更、工作流）不一起蹦出来，而是按顺序一个接一个
+// （选用插件的提示条在回复上面，回复一开始就在，不参与排序）：
 // 每个框的入场动画延迟 = 它前面「实际出现的框」数量 × BANNER_GAP_S。这里只算出 --gap，动画写在各组件里。
 const BANNER_GAP_S = 0.6
 function gapSeconds(m, slot) {
   if (gapDone.has(m.id)) return 0
-  const shown = [!!m.eureka, !!m.skill_selection, !!m.file_change, !!m.eureka?.run]
+  const shown = [!!m.eureka, !!m.file_change, !!m.eureka?.run]
   const before = shown.slice(0, slot).filter(Boolean).length
   return (before + 1) * BANNER_GAP_S // +1：第一个框也等一会儿，让回复文字先落定
 }
@@ -117,12 +125,14 @@ function scrollToBottom({ force = false } = {}) {
 function addMessages(incoming) {
   const known = new Set(messages.value.map((m) => m.id))
   for (const m of incoming) if (!known.has(m.id)) messages.value.push(m)
+  if (incoming.some((m) => m.role === 'assistant' && m.skill_selection)) pendingSelection.value = null
   messages.value.sort((a, b) => a.id - b.id)
   scrollToBottom()
 }
 
 async function selectSession(id) {
   if (closeStream) closeStream()
+  stopPolling()
   currentId.value = id
   saveLastSession(id) // 刷新后回到这个会话
   pendingFile.value = null // 选好还没传的文件属于原来的会话，不能带到新会话里
@@ -131,19 +141,57 @@ async function selectSession(id) {
   messages.value = []
   finished.clear()
   gapDone.clear()
+  pendingSelection.value = null
+  await refreshCounts(id).catch(() => {}) // 计数可能在别处变过（切走时回复才完成）
+  // 这一轮选完 skill 但回复还没存好：后端把提示存在会话上，刷新 / 切页回来也要看到；回复存好后由消息自带的提示条接替
+  const session = sessions.value.find((s) => s.id === id)
+  applyPending(id, session)
   addMessages(await listMessages(id))
   const last = messages.value.length ? messages.value[messages.value.length - 1].id : 0
   closeStream = openStream(id, last, (m) => addMessages([m]))
+  if (session?.running && waitingId.value !== id) pollWhileRunning(id) // 这一轮还在后端跑，页面没有它的流：轮询跟进
 }
 
 // 会话下拉框的选项
 
 const currentSession = computed(() => sessions.value.find((s) => s.id === currentId.value))
 
-// 每次请求完成后更新一次计数：重新取会话列表，只取当前会话的三个计数
-async function refreshCounts() {
-  const fresh = (await listSessions()).find((s) => s.id === currentId.value)
-  const current = sessions.value.find((s) => s.id === currentId.value)
+// 一轮还在后端跑、而这个页面没有它的流（刷新了，或切走又切回来）：每隔几秒取一次，计数和选用插件提示跟着库走，
+// 直到这一轮结束。当前页面自己正在收流的那一轮（waitingId / sending）由流事件更新，不用轮询。
+const POLL_RUNNING_MS = 2000
+let pollTimer = null
+function stopPolling() {
+  clearTimeout(pollTimer)
+  pollTimer = null
+}
+function pollWhileRunning(id) {
+  stopPolling()
+  pollTimer = setTimeout(async () => {
+    if (currentId.value !== id) return // 切走了：这个会话不再跟
+    if (sending.value) return pollWhileRunning(id) // 自己正在收流，等它结束再说
+    await refreshCounts(id).catch(() => {})
+    if (currentId.value !== id) return
+    const current = sessions.value.find((s) => s.id === id)
+    if (current?.running) {
+      applyPending(id, current)
+      pollWhileRunning(id)
+    } else {
+      // 这一轮结束了：回复已存好，把它和提示条补进来（SSE 的补发也会来，按 id 去重）
+      bumpStats(id)
+      pendingSelection.value = null
+      addMessages(await listMessages(id, messages.value.filter((m) => Number.isFinite(m.id)).at(-1)?.id ?? 0))
+    }
+  }, POLL_RUNNING_MS)
+}
+// 会话上带着还没存好的选用插件提示，就显示成临时提示条；没有就清掉
+function applyPending(id, session) {
+  pendingSelection.value = session?.pending_selection ? { sessionId: id, ...session.pending_selection } : null
+}
+
+// 更新指定会话的计数：重新取会话列表。必须按「发送时的会话」而不是当前会话，回复期间用户可能已经切走
+async function refreshCounts(id) {
+  const fresh = (await listSessions()).find((s) => s.id === id)
+  const current = sessions.value.find((s) => s.id === id)
   if (fresh && current) Object.assign(current, fresh)
 }
 
@@ -193,6 +241,7 @@ async function send() {
   const options = buildSendOptions(modelChoice.value) // 点发送这一刻的选择，随这句话一起透传给后端
   // 有文件时，没有文字也能发；什么都没有就不动
   if (!content || !currentId.value || sending.value) return
+  const sentId = currentId.value
   sending.value = true
   try {
     // 先上传文件，await 它结束，才发送文本——sendWithAttachment 保证这个先后顺序，上传失败就不会发文本
@@ -215,7 +264,6 @@ async function send() {
     // 成功才清空；失败时保留文字和文件，用户可以直接重试
     draft.value = ''
     pendingFile.value = null
-    refreshCounts()
   } catch (e) {
     if (e.stage === 'upload') {
       message.error(`文件上传失败，文本未发送：${uploadErrorMessage(e.cause)}`)
@@ -225,6 +273,7 @@ async function send() {
       message.error(attachment ? '文件已上传，但消息发送失败，请重试' : '发送失败，请重试')
     }
   } finally {
+    refreshCounts(sentId).then(() => bumpStats(sentId)).catch(() => {}) // 失败也刷新：后端可能已经算过这一轮了
     stage.value = ''
     sending.value = false
   }
@@ -238,6 +287,9 @@ async function streamReply(content, options) {
   waitingId.value = sessionId
   let live = null
   let final = null // done 事件带来的、存好的真消息
+  // 回复期间用户可能切到了别的会话：这时流事件只更新「发送时那个会话」的数据（标题、计数），
+  // 不能碰当前显示的消息列表和提示条，否则 A 的回复会串到 B 里；A 的消息切回去时由接口取回
+  const here = () => currentId.value === sessionId
   // delta 到达的节奏不均匀，交给打字机匀到每一帧，每帧最多更新一次界面
   const typewriter = createTypewriter((text) => {
     live.content += text
@@ -246,7 +298,8 @@ async function streamReply(content, options) {
   const dropLive = () => {
     waitingId.value = null
     typewriter.cancel()
-    if (live) messages.value.splice(messages.value.indexOf(live), 1)
+    const at = live ? messages.value.indexOf(live) : -1
+    if (at >= 0) messages.value.splice(at, 1)
     live = null
   }
   try {
@@ -260,11 +313,23 @@ async function streamReply(content, options) {
           if (current) current.title = title
         },
         user: (m) => {
+          if (!here()) return
           addMessages([m])
           scrollToBottom({ force: true }) // 自己刚发的话，一定要看到
           nextTick(() => scrollToBottom({ force: true })) // 等待提示也要露出来
         },
+        // skill_selector 一选完（正式请求之前）就推来：马上显示提示条，不等整轮结束
+        skills: (selection) => {
+          if (here()) pendingSelection.value = { sessionId, ...selection }
+        },
+        // 每次请求、每次工具调用、每轮结束，后端都推一次最新计数：标题边跑边涨，不用等整轮结束
+        stats: ({ running, ...counts }) => {
+          const current = sessions.value.find((s) => s.id === sessionId)
+          if (current) Object.assign(current, counts, { running })
+          if (!running) bumpStats(sessionId) // 轮结束：平均值和明细都变了
+        },
         delta: ({ text }) => {
+          if (!here()) return // 切走了：文字不显示，回来时从库里取完整回复
           if (!live) {
             waitingId.value = null
             messages.value.push({ id: Infinity, role: 'assistant', content: '' })
@@ -273,18 +338,21 @@ async function streamReply(content, options) {
           typewriter.push(text)
         },
         // 网络已经收完，但屏幕上的文字还在按节奏慢慢长：先记下真消息，等显示完再换
-        done: (m) => (final = m),
+        done: (m) => (final = here() ? m : null),
       },
       options, // { model, effort }：原样透传给后端
     )
     await typewriter.drain() // 让用户把已收到的文字看完（切会话 / 出错会 cancel，等待随之结束）
-    if (final && live) {
+    if (!here()) dropLive() // 切走了：清掉这次的临时消息（切会话时列表已换，splice 找不到就跳过）
+    else if (final && live) {
       finished.add(final.id) // 记下：这条回复刚长完，带着「完成态」效果留在列表里
       typewriter.finish()
       dropLive()
+      pendingSelection.value = null
       addMessages([final])
     }
   } catch (e) {
+    if (here()) pendingSelection.value = null
     dropLive() // 流中途断了：去掉半截的临时消息；已存的消息以服务器为准，刷新就能看到
     throw e
   }
@@ -298,7 +366,10 @@ onMounted(async () => {
   if (id) await selectSession(id)
   else await newSession()
 })
-onBeforeUnmount(() => closeStream && closeStream())
+onBeforeUnmount(() => {
+  stopPolling()
+  if (closeStream) closeStream()
+})
 </script>
 
 <template>
@@ -377,19 +448,27 @@ onBeforeUnmount(() => closeStream && closeStream())
           <div>发送第一条消息，开始对话</div>
         </div>
         <div v-for="m in messages" :key="m.id" class="row" :class="[m.role, { live: m.id === Infinity, settled: finished.has(m.id) }]">
-          <div class="bubble">{{ m.content }}</div>
-          <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
-          <EurekaBanner v-if="m.eureka" :text="m.eureka.text" :style="gapStyle(m, 0)" />
-          <!-- 文件变更：这一轮工作区有文件创建或变更；和 eureka 提示条一样，刷新后由后端带回来 -->
-          <!-- 选中 skill：skill_selector 这一轮选中了插件/工作流；和文件变更提示条一样，刷新后由后端带回来 -->
+          <!-- 选中 skill：skill_selector 在回复之前触发，所以提示条放在回复气泡的上面（和边跑边推的临时条同一个位置）；刷新后由后端带回来 -->
           <SkillSelectionBanner
             v-if="m.skill_selection"
             :text="m.skill_selection.text"
             :plugins="m.skill_selection.plugins"
             :workflows="m.skill_selection.workflows"
-            :style="gapStyle(m, 1)"
+            :style="{ '--gap': '0s' }"
           />
-          <FileChangeBanner v-if="m.file_change" :text="m.file_change.text" :files="m.file_change.files" :style="gapStyle(m, 2)" @open-file="openInWorkspace" />
+          <!-- 正在长的回复：存库前的临时提示条也画在它上面，不能留在列表外面被挤到它下面 -->
+          <SkillSelectionBanner
+            v-if="m.id === Infinity && shownPending"
+            :text="shownPending.text"
+            :plugins="shownPending.plugins"
+            :workflows="shownPending.workflows"
+            :style="{ '--gap': '0s' }"
+          />
+          <div class="bubble">{{ m.content }}</div>
+          <!-- eureka 时刻：挂在这条模型回复下面的提示条；不是消息内容，刷新后由后端带回来 -->
+          <EurekaBanner v-if="m.eureka" :text="m.eureka.text" :style="gapStyle(m, 0)" />
+          <!-- 文件变更：这一轮工作区有文件创建或变更；和 eureka 提示条一样，刷新后由后端带回来 -->
+          <FileChangeBanner v-if="m.file_change" :text="m.file_change.text" :files="m.file_change.files" :style="gapStyle(m, 1)" @open-file="openInWorkspace" />
           <!-- 勾选了工作流但回复没按格式：说明原因（后端写的，刷新后还在） -->
           <div v-if="m.notice" class="notice" role="status">{{ m.notice }}</div>
           <!-- 提示条下面：这条 eureka 展开了工作流就显示执行进度（刷新后由后端带回 run 的 id 和状态） -->
@@ -399,11 +478,19 @@ onBeforeUnmount(() => closeStream && closeStream())
             :session-id="currentId"
             :run-id="m.eureka.run.id"
             :initial-status="m.eureka.run.status"
-            :style="gapStyle(m, 3)"
-            :gap="gapSeconds(m, 3)"
+            :style="gapStyle(m, 2)"
+            :gap="gapSeconds(m, 2)"
             @update="onRunUpdate"
             @finished="onRunFinished"
             @open-link="openInPreview"
+          />
+        </div>
+        <!-- 刚选中 skill：回复还没存库，先单独显示提示条；回复存好后由那条消息自己的提示条接替 -->
+        <div v-if="shownPending && !hasLive" class="row assistant">
+          <SkillSelectionBanner
+            :text="shownPending.text"
+            :plugins="shownPending.plugins"
+            :workflows="shownPending.workflows"
           />
         </div>
         <!-- 等模型回复：随机词 + ...，第一段回复到来后就被真正的回复替换 -->
@@ -431,6 +518,7 @@ onBeforeUnmount(() => closeStream && closeStream())
               v-if="currentSession"
               :session-id="currentSession.id"
               :label="`${currentSession.request_count} 次请求 · ${currentSession.turn_count} 轮 · ${currentSession.tool_count} 次工具`"
+              :version="statsVersion[currentSession.id] || 0"
             />
             <ModelPicker v-model="modelChoice" :disabled="sending" />
             <n-button

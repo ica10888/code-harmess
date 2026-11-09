@@ -9,9 +9,9 @@ import logging
 import os
 import queue
 import threading
+import time
 from dataclasses import asdict
 from datetime import datetime
-from itertools import islice
 
 from django.conf import settings
 
@@ -126,26 +126,64 @@ def _agent(session, model: str | None = None) -> Agent:
     return agent
 
 
+COUNT_FIELD = {"request": "request_count", "turn": "turn_count", "tool": "tool_count"}
+
+
+def _counts(session, running: bool = True) -> dict:
+    """会话最新的三个计数 + running（这一轮是否还在跑）。轮结束那条 stats 带 running=False，前端据此重取平均值和明细。"""
+    return {**{f: getattr(session, f) for f in COUNT_FIELD.values()}, "running": running}
+
+
+def _bump(session, kind: str) -> dict:
+    field = COUNT_FIELD[kind]
+    setattr(session, field, getattr(session, field) + 1)
+    session.save(update_fields=[field])
+    return _counts(session)
+
+
+def start_turn(session) -> TurnStat:
+    """轮开始时先建一条占位的 TurnStat（finished=False），并让会话的轮数 +1。
+
+    这一轮的请求和工具直接挂在它名下，所以轮还没结束，会话统计明细里也能展开看到已发生的请求和工具；
+    轮结束时 record_stat("turn", ...) 再回填耗时和次数。
+    """
+    turn = TurnStat.objects.create(session=session, seconds=0, finished=False)
+    _bump(session, "turn")
+    return turn
+
+
+def record_stat(session, turn: TurnStat, kind: str, stat) -> dict:
+    """记一条统计（kind 是 request / tool / turn）并立刻落库，返回会话最新的三个计数。
+
+    request / tool：新建一条挂在 turn 名下的记录，计数 +1。turn：回填占位轮的耗时和次数，标记完成（轮数在 start_turn 已加过）。
+    """
+    if kind == "request":
+        RequestStat.objects.create(session=session, turn=turn, **asdict(stat))
+    elif kind == "tool":
+        ToolStat.objects.create(session=session, turn=turn, **asdict(stat))
+    else:
+        TurnStat.objects.filter(pk=turn.pk).update(finished=True, **asdict(stat))
+        return _counts(session, running=False)
+    return _bump(session, kind)
+
+
+def abort_turn(turn: TurnStat, agent: Agent, started: float) -> None:
+    """这一轮中途失败：占位轮不能一直停在「进行中」，按已经发生的请求和工具数结算。"""
+    counter = agent.counter
+    TurnStat.objects.filter(pk=turn.pk).update(
+        finished=True, seconds=time.monotonic() - started, requests=counter.requests, tools=counter.tools
+    )
+
+
 def _finish(session, agent: Agent, answer) -> str:
     """整轮成功后：保存对话，拼出要展示给用户的完整回复（run_turn 和 stream_turn 共用）。
 
     skill_selector 这一轮选中的 skill 名顺手记在 session.selected_skills 上（不入库的临时属性），
     由 services.save_assistant_message 取走并存成 SkillSelection；返回类型不变，已有的调用方和测试都不用动。
+    统计不在这里存：请求、工具、轮每发生一次就由 record_stat 存好了。
     """
     session.conversation = json.loads(json.dumps(agent.current.conversation))  # 确保能存进 JSONField
-    counter = agent.counter  # 这一轮 core 数出来的次数，累加进会话
-    session.request_count += counter.requests
-    session.turn_count += counter.turns
-    session.tool_count += counter.tools
-    session.save(update_fields=["conversation", "request_count", "turn_count", "tool_count"])
-    # 每个 turn 带着自己的请求数和工具数，请求和工具记录是按发生顺序存的，依次切下来就知道各属于哪一轮
-    requests, tools = iter(counter.request_stats), iter(counter.tool_stats)
-    for t in counter.turn_stats:
-        turn = TurnStat.objects.create(session=session, **asdict(t))
-        RequestStat.objects.bulk_create(
-            RequestStat(session=session, turn=turn, **asdict(r)) for r in islice(requests, t.requests)
-        )
-        ToolStat.objects.bulk_create(ToolStat(session=session, turn=turn, **asdict(x)) for x in islice(tools, t.tools))
+    session.save(update_fields=["conversation"])
     session.selected_skills = list(answer.selected)
     texts = [*answer.texts, PAUSED_NOTICE.format(rounds=settings.HARNESS_MAX_TOOL_ROUNDS)] if answer.paused else answer.texts
     return "\n\n".join(texts) or EMPTY_REPLY
@@ -171,15 +209,19 @@ def run_turn(session, user_text: str, model: str | None = None, effort: str | No
     Agent.respond 在副本上推进对话，整轮成功才写回；中途抛异常时对话原样不动，所以这里也只在成功后才保存。
     """
     agent = _agent(session, model)
-    return _finish(
-        session,
-        agent,
-        agent.respond(user_text, model=model, effort=effort, extra_context=workflow_context_for(session)),
-    )
+    turn, started = start_turn(session), time.monotonic()
+    agent.counter.listener = lambda kind, stat: record_stat(session, turn, kind, stat)
+    try:
+        answer = agent.respond(user_text, model=model, effort=effort, extra_context=workflow_context_for(session))
+    except Exception:
+        abort_turn(turn, agent, started)
+        raise
+    return _finish(session, agent, answer)
 
 
 def stream_turn(session, user_text: str, model: str | None = None, effort: str | None = None):
-    """和 run_turn 一样处理一句话，但边生成边吐：依次产出 ("delta", 一段文字) …… 最后产出 ("done", 完整回复)。
+    """和 run_turn 一样处理一句话，但边生成边吐：依次产出 ("delta", 一段文字)、("skills", 选中的 skill 名)、("stats", 最新计数) …… 最后产出 ("done", 完整回复)。
+    stats 在轮开始、每次请求、每次工具调用、轮结束时各来一次，统计这时就已经存库了。
 
     Agent.respond 是同步的，所以放在一个线程里跑，文字片段经队列交给这个生成器。
     失败时在生成器里重新抛出异常（对话没动，调用方决定怎么告诉用户）。
@@ -188,6 +230,10 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
     pieces: queue.Queue = queue.Queue()
     outcome: dict = {}
     agent = _agent(session, model)
+    turn, started = start_turn(session), time.monotonic()
+    # 每记一条请求 / 工具 / 轮，就交给下面的循环落库并推给前端（在工作线程里只放队列，库操作都在调用方的线程）
+    agent.counter.listener = lambda kind, stat: pieces.put(("stat", (kind, stat)))
+    on_skills = lambda names: pieces.put(("skills", names))  # noqa: E731  选中 skill 的那一刻就交给生成器往外推
     extra_context = workflow_context_for(session)
 
     def work():
@@ -198,6 +244,7 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
                 model=model,
                 effort=effort,
                 extra_context=extra_context,
+                on_skills=on_skills,
             )
         except Exception as e:  # 交给生成器所在的线程去抛
             outcome["error"] = e
@@ -206,9 +253,14 @@ def stream_turn(session, user_text: str, model: str | None = None, effort: str |
 
     thread = threading.Thread(target=work, daemon=True)
     thread.start()
+    yield "stats", _counts(session)  # 轮已经开始（占位轮已建）：前端马上看到轮数 +1
     while (item := pieces.get()) is not None:
-        yield item
+        if item[0] == "stat":
+            yield "stats", record_stat(session, turn, *item[1])
+        else:
+            yield item
     thread.join()
     if "error" in outcome:
+        abort_turn(turn, agent, started)
         raise outcome["error"]
     yield "done", _finish(session, agent, outcome["answer"])

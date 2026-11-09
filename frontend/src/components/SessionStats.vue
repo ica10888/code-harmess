@@ -1,6 +1,6 @@
 <script setup>
 // 输入框下方的计数文字；点击弹出「会话统计」：请求和工具记录的平均值。每次点开都重新取一次，所以总是最新的。
-import { h, ref } from 'vue'
+import { h, ref, watch } from 'vue'
 import { NButton, NDataTable, NIcon, NModal, NPopover } from 'naive-ui'
 import { StatsChartOutline } from '@vicons/ionicons5'
 import { getRequestContent, getSessionStats, getSessionStatsDetail } from '../api'
@@ -8,9 +8,12 @@ import { getRequestContent, getSessionStats, getSessionStatsDetail } from '../ap
 const props = defineProps({
   sessionId: { type: String, required: true },
   label: { type: String, required: true }, // 计数文字，例如「3 次请求 · 1 轮 · 2 次工具」
+  // 数据版本号：一轮结束（回复存好）时 +1。计数文字在轮结束时不变（轮数开始就加过了），但平均值和明细变了，所以要单独通知
+  version: { type: Number, default: 0 },
 })
 
 const stats = ref(null)
+const popoverShown = ref(false)
 const detail = ref(null) // 明细列表；点「明细」按钮时才取
 const showDetail = ref(false)
 
@@ -20,10 +23,12 @@ const contents = ref({})
 async function loadContent(row) {
   if (contents.value[row.id]) return
   contents.value[row.id] = 'loading'
+  const id = props.sessionId
   try {
-    contents.value[row.id] = await getRequestContent(props.sessionId, row.id)
+    const content = await getRequestContent(id, row.id)
+    if (id === props.sessionId) contents.value[row.id] = content // 期间换了会话就丢弃
   } catch {
-    contents.value[row.id] = 'error'
+    if (id === props.sessionId) contents.value[row.id] = 'error'
   }
 }
 
@@ -48,7 +53,7 @@ const toolColumns = [
 const turnColumns = [
   { type: 'expand', renderExpand: renderTurn },
   { title: '轮 #', key: 'id', width: 64 },
-  { title: '耗时（秒）', key: 'seconds', minWidth: 90, render: (r) => sec(r.seconds) },
+  { title: '耗时（秒）', key: 'seconds', minWidth: 90, render: (r) => (r.finished ? sec(r.seconds) : '进行中…') },
   { title: '请求次数', key: 'requests', minWidth: 80 },
   { title: '工具次数', key: 'tools', minWidth: 80 },
 ]
@@ -82,31 +87,59 @@ function renderTurn(row) {
   ])
 }
 
-async function openDetail() {
-  contents.value = {}
+async function openDetail(refresh = false) {
   showDetail.value = true
-  detail.value = null
+  if (refresh !== true) {
+    contents.value = {}
+    detail.value = null // 刷新时保留旧数据，表格不闪、展开的行不收
+  }
+  const id = props.sessionId
   try {
-    detail.value = await getSessionStatsDetail(props.sessionId)
+    const result = await getSessionStatsDetail(id)
+    if (id === props.sessionId) detail.value = result
   } catch {
-    detail.value = { turns: [] }
+    if (id === props.sessionId && !detail.value) detail.value = { turns: [] } // 刷新失败时保留旧数据
   }
 }
 
 async function load() {
+  const id = props.sessionId
   try {
-    stats.value = await getSessionStats(props.sessionId)
+    const result = await getSessionStats(id)
+    if (id === props.sessionId) stats.value = result
   } catch {
-    stats.value = null
+    if (id === props.sessionId) stats.value = null
   }
 }
+
+// 换了会话：弹窗和明细里还是上一个会话的数据，必须清掉并关掉；否则点开弹窗在重新取到之前会短暂显示别的会话的统计，
+// 慢请求晚到时还会把旧会话的结果盖到新会话上（下面几个取数函数也按发起时的会话丢弃过期结果）
+watch(
+  () => props.sessionId,
+  () => {
+    stats.value = null
+    detail.value = null
+    contents.value = {}
+    showDetail.value = false
+    popoverShown.value = false
+  },
+)
+
+// 计数变了（后端每次请求 / 工具调用都会推），或一轮刚结束：弹窗或明细开着就跟着刷新，不用关了再开
+watch(
+  () => [props.label, props.version],
+  () => {
+    if (popoverShown.value) load()
+    if (showDetail.value) openDetail(true)
+  },
+)
 
 // 没有记录时后端给 null，显示成「-」
 const num = (v, digits = 2, unit = '') => (v == null ? '-' : `${v.toFixed(digits)}${unit}`)
 </script>
 
 <template>
-  <n-popover trigger="click" placement="top" :width="260" @update:show="(show) => show && load()">
+  <n-popover trigger="click" placement="top" :width="260" @update:show="(show) => ((popoverShown = show) && load())">
     <template #trigger>
       <span class="counts" role="button" title="点击查看会话统计"><n-icon class="stats-icon"><StatsChartOutline /></n-icon><span class="full">{{ label }}</span><span class="short">统计</span></span>
     </template>

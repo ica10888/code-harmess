@@ -166,6 +166,14 @@ class Counter:
     request_stats: list[RequestStat] = field(default_factory=list)
     tool_stats: list[ToolStat] = field(default_factory=list)
     turn_stats: list[TurnStat] = field(default_factory=list)
+    # 每记一条就调用一次 listener("request" | "tool" | "turn", 那条记录)：调用方据此边跑边更新，不用等整轮结束
+    listener: Callable[[str, object], None] | None = None
+
+    def add(self, kind: str, stat) -> None:
+        """记一条（kind 是 request / tool / turn）并通知 listener。"""
+        getattr(self, f"{kind}_stats").append(stat)
+        if self.listener:
+            self.listener(kind, stat)
 
     @property
     def turns(self) -> int:
@@ -186,7 +194,9 @@ class Answer:
 
     texts: list[str]
     paused: bool = False
-    selected: list[str] = field(default_factory=list)  # 这一轮 skill_selector 选中的 skill 名（哪怕全文已在对话里、没再放）
+    selected: list[str] = field(
+        default_factory=list
+    )  # 这一轮 skill_selector 选中的 skill 名（哪怕全文已在对话里、没再放）
 
 
 @dataclass
@@ -421,14 +431,15 @@ class Agent:
         start = time.monotonic()
         result = self._run_tool(call)
         ok = not result.is_error
-        self.counter.tool_stats.append(
+        self.counter.add(
+            "tool",
             ToolStat(
                 call.name,
                 time.monotonic() - start,
                 FILES_READ.get(call.name, 0) if ok else 0,
                 FILES_WRITTEN.get(call.name, 0) if ok else 0,
                 [str(call.input["path"])] if ok and call.name in FILES_READ | FILES_WRITTEN else [],
-            )
+            ),
         )
         return result
 
@@ -494,14 +505,15 @@ class Agent:
             def record(sent: list[dict], reply: Reply) -> None:
                 """选 skill 也是一次请求：和正式请求一样记耗时、token、输入和输出。"""
                 usage = reply.usage
-                self.counter.request_stats.append(
+                self.counter.add(
+                    "request",
                     RequestStat(
                         time.monotonic() - start,
                         usage.input_tokens if usage else 0,
                         usage.output_tokens if usage else 0,
                         sent,
                         [{"role": "assistant", "content": reply.texts}],
-                    )
+                    ),
                 )
 
             refs = pick_skills(self.provider, user_input, usable, on_request=record)
@@ -604,14 +616,15 @@ class Agent:
         start = time.monotonic()
         reply = self.provider.chat(conversation, list(self.tools.values()), self.system, **extra)
         usage = reply.usage
-        self.counter.request_stats.append(
+        self.counter.add(
+            "request",
             RequestStat(
                 time.monotonic() - start,
                 usage.input_tokens if usage else 0,
                 usage.output_tokens if usage else 0,
                 sent,
                 copy.deepcopy(conversation[len(sent) :]),
-            )
+            ),
         )
         if reply.usage:
             self._log_usage(reply.usage)
@@ -627,8 +640,11 @@ class Agent:
 
     def _end_turn(self, start: float, requests_before: int, tools_before: int) -> None:
         """turn 结束（respond 返回前）：记一条 TurnStat。"""
-        self.counter.turn_stats.append(
-            TurnStat(time.monotonic() - start, self.counter.requests - requests_before, self.counter.tools - tools_before)
+        self.counter.add(
+            "turn",
+            TurnStat(
+                time.monotonic() - start, self.counter.requests - requests_before, self.counter.tools - tools_before
+            ),
         )
 
     @staticmethod
@@ -656,6 +672,7 @@ class Agent:
         effort: str | None = None,
         skills_message: str | None = None,
         extra_context: Callable[[list[str]], str | None] | None = None,
+        on_skills: Callable[[list[str]], None] | None = None,
     ) -> Answer:
         """没有终端的一问一答（后端用）：处理一句用户的话，返回模型说的文字。
 
@@ -673,6 +690,9 @@ class Agent:
         不给就由 skill_selector 先选一次，选中的全文放在同一个位置。
 
         extra_context：先选后载选中 skill 之后，用它们的名字回调；返回的文字紧跟在 skill 全文后面作为 user 消息。
+
+        on_skills：skill_selector 选中了 skill 的那一刻（正式请求之前）用选中的名字回调一次，没选中就不调用；
+        调用方据此立刻告诉用户，不用等整轮结束。回调里抛的异常不会影响这一轮。
         """
         turn_start = time.monotonic()
         requests_before, tools_before = self.counter.requests, self.counter.tools  # 选 skill 的请求也算在这个 turn 里
@@ -680,6 +700,11 @@ class Agent:
         chosen: list[str] = []
         if not skills_message:  # 调用方给了就不再选
             skills_message, chosen = self._selected_skills_message(user_input, conversation, extra_context)
+            if chosen and on_skills:
+                try:
+                    on_skills(list(chosen))
+                except Exception as e:  # noqa: BLE001  通知失败不能拖垮这一轮
+                    print(f"\033[2m· 通知选中的 skill 失败，已忽略：{e}\033[0m", file=sys.stderr)
         if skills_message:
             conversation.append({"role": "user", "content": skills_message})
         conversation.append({"role": "user", "content": user_input})

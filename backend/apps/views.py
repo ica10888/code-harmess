@@ -5,6 +5,7 @@ import time
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db.models import Exists, OuterRef
 from django.http import FileResponse, Http404, HttpResponse, StreamingHttpResponse
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
@@ -14,7 +15,7 @@ from rest_framework.views import APIView
 from providers import DEFAULT_EFFORT  # core：默认推理强度的唯一来源
 
 from . import services, workflow_runtime, workflows
-from .models import ChatSession, StageRun, WorkflowRun
+from .models import ChatSession, StageRun, TurnStat, WorkflowRun
 from .options import Effort, Model
 from .serializers import (
     ChatSessionSerializer,
@@ -37,7 +38,9 @@ def get_own_session(request, session_id) -> ChatSession:
 
 class SessionListView(APIView):
     def get(self, request):
-        sessions = ChatSession.objects.filter(owner_key=services.owner_key_of(request))
+        sessions = ChatSession.objects.filter(owner_key=services.owner_key_of(request)).annotate(
+            running=Exists(TurnStat.objects.filter(session=OuterRef("pk"), finished=False))
+        )
         return Response(ChatSessionSerializer(sessions, many=True).data)
 
     def post(self, request):

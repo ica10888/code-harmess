@@ -14,7 +14,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from apps import harness
+from apps import harness, services
 from apps.models import ChatSession, Message
 from providers import Reply, ToolCall, Usage
 
@@ -249,8 +249,15 @@ class StreamTurnTests(TestCase):
 
     def test_yields_text_pieces_then_the_full_final_text_and_saves_the_conversation(self):
         session, events = self.stream(FakeProvider(text("你好世界")))
-        assert events[:-1] == [("delta", "你好"), ("delta", "世界")]
+        assert [e for e in events if e[0] == "delta"] == [("delta", "你好"), ("delta", "世界")]
         assert events[-1] == ("done", "你好世界")
+        # 轮一开始就有一条 stats（0/1/0，占位轮已建），请求结束一条（1/1/0），轮结束一条；都在 done 之前、统计已存库
+        stats = [d for k, d in events if k == "stats"]
+        assert stats == [
+            {"request_count": 0, "turn_count": 1, "tool_count": 0, "running": True},
+            {"request_count": 1, "turn_count": 1, "tool_count": 0, "running": True},
+            {"request_count": 1, "turn_count": 1, "tool_count": 0, "running": False},  # 轮结束：前端据此重取平均值和明细
+        ]
         assert [m["role"] for m in ChatSession.objects.get(pk=session.pk).conversation] == ["user", "assistant"]
 
     def test_final_text_includes_the_pause_notice_that_was_never_streamed(self):
@@ -265,6 +272,49 @@ class StreamTurnTests(TestCase):
         with self.assertRaisesMessage(RuntimeError, "boom"):
             self.stream(FakeProvider(RuntimeError("boom")), session=session)
         assert ChatSession.objects.get(pk=session.pk).conversation == []
+
+
+class InProgressTurnTests(TestCase):
+    def test_detail_shows_the_unfinished_turn_with_the_records_so_far(self):
+        """轮还没结束：占位轮已在明细里，已发生的请求和工具挂在它名下，次数按已有记录算。"""
+        session = ChatSession.objects.create(owner_key="k")
+        turn = harness.start_turn(session)
+        from agent import RequestStat, ToolStat
+
+        harness.record_stat(session, turn, "request", RequestStat(1.5, 10, 2))
+        harness.record_stat(session, turn, "tool", ToolStat("read_file", 0.1, 1, 0, ["a.txt"]))
+        row = services.session_stats_detail(session)["turns"][0]
+        assert (row["finished"], row["requests"], row["tools"]) == (False, 1, 1)
+        assert [r["input_tokens"] for r in row["request_list"]] == [10] and row["tool_list"][0]["name"] == "read_file"
+        assert services.session_stats(session)["turn"]["avg_seconds"] is None  # 平均值只算完成的轮
+
+    def test_turn_stat_is_filled_in_when_the_turn_ends(self):
+        session = ChatSession.objects.create(owner_key="k")
+        with mock.patch("apps.harness.get_provider", return_value=FakeProvider(text("好"))):
+            list(harness.stream_turn(session, "hi"))
+        row = services.session_stats_detail(session)["turns"][0]
+        assert (row["finished"], row["requests"], row["tools"]) == (True, 1, 0)
+        assert session.turn_stats.count() == 1  # 占位的就是最终那条，没有多建
+
+    def test_a_failed_turn_is_settled_not_left_in_progress(self):
+        session = ChatSession.objects.create(owner_key="k")
+        with self.assertRaises(RuntimeError):
+            with mock.patch("apps.harness.get_provider", return_value=FakeProvider(RuntimeError("boom"))):
+                list(harness.stream_turn(session, "hi"))
+        assert session.turn_stats.get().finished is True
+
+
+class StreamDisconnectTests(TestCase):
+    def test_client_disconnect_mid_stream_still_saves_the_reply_and_counts(self):
+        """客户端中途断开（刷新页面、关标签）：模型照样跑完，回复和计数都要存下来，不能只剩一条用户消息。"""
+        session = ChatSession.objects.create(owner_key="k")
+        with mock.patch("apps.harness.get_provider", return_value=FakeProvider(text("你好世界"))):
+            events = services.stream_user_message(session, "问")
+            while next(events)[0] != "user":
+                pass
+            events.close()  # 模拟 Django 在客户端断开后关闭响应的生成器
+        assert [(m.role, m.content) for m in Message.objects.filter(session=session)] == [("user", "问"), ("assistant", "你好世界")]
+        assert ChatSession.objects.get(pk=session.pk).request_count == 1
 
 
 class StreamMessageApiTests(TestCase):
@@ -285,7 +335,8 @@ class StreamMessageApiTests(TestCase):
         res = self.post(FakeProvider(text("你好世界")), "问")
         assert res["Content-Type"].startswith("text/event-stream") and res["Cache-Control"] == "no-cache"
         events = res.events
-        assert [e for e, _ in events] == ["title", "user", "delta", "delta", "done"]
+        assert [e for e, _ in events if e != "stats"] == ["title", "user", "delta", "delta", "done"]
+        assert [e for e, _ in events].count("stats") == 3
         assert events[0][1] == {"title": "问"}  # 第一句话同时成为会话标题
         assert events[1][1]["content"] == "问" and events[1][1]["role"] == "user"
         assert "".join(d["text"] for e, d in events if e == "delta") == "你好世界"
@@ -397,3 +448,20 @@ class WorkspaceTests(TestCase):
             provider = FakeProvider(text("ok"))
             run(provider)
         assert provider.calls[0]["tools"] == ["read_file", "run_bash"]
+
+
+class RunningFlagTests(TestCase):
+    def test_session_list_says_whether_a_turn_is_still_running(self):
+        """刷新 / 切回来的页面靠 running 知道这一轮还在后端跑，要继续跟进计数和选用插件提示。"""
+        client = APIClient()
+        sid = client.post("/api/sessions/", {}, format="json").json()["id"]
+        assert client.get("/api/sessions/").json()[0]["running"] is False
+
+        session = ChatSession.objects.get(pk=sid)
+        turn = harness.start_turn(session)
+        assert client.get("/api/sessions/").json()[0]["running"] is True
+
+        from agent import TurnStat
+
+        harness.record_stat(session, turn, "turn", TurnStat(1.0, 0, 0))
+        assert client.get("/api/sessions/").json()[0]["running"] is False

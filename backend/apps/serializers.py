@@ -9,11 +9,13 @@ from .options import Effort, Model
 class ChatSessionSerializer(serializers.ModelSerializer):
     # title 可以不传或传空串，用模型默认值
     title = serializers.CharField(max_length=100, required=False, allow_blank=True)
+    # 这个会话有没有一轮还在进行（占位轮没结算）：刷新 / 切回来的页面据此继续跟进计数；列表接口用子查询算好，新建时没有就是 False
+    running = serializers.BooleanField(read_only=True, default=False)
 
     class Meta:
         model = ChatSession
-        fields = ["id", "title", "created_at", "request_count", "turn_count", "tool_count"]
-        read_only_fields = ["id", "created_at", "request_count", "turn_count", "tool_count"]
+        fields = ["id", "title", "created_at", "request_count", "turn_count", "tool_count", "pending_selection", "running"]
+        read_only_fields = ["id", "created_at", "request_count", "turn_count", "tool_count", "pending_selection", "running"]
 
     def validate_title(self, value):
         return value.strip() or ChatSession._meta.get_field("title").default

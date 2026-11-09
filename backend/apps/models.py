@@ -19,6 +19,8 @@ class ChatSession(models.Model):
     request_count = models.PositiveIntegerField(default=0)
     turn_count = models.PositiveIntegerField(default=0)
     tool_count = models.PositiveIntegerField(default=0)
+    # 这一轮 skill_selector 刚选完、回复还没存时的提示 {"text", "plugins", "workflows"}：让刷新 / 切页后还能看到；回复存好就清空
+    pending_selection = models.JSONField(null=True, blank=True, default=None)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -170,3 +172,5 @@ class TurnStat(models.Model):
     seconds = models.FloatField()
     requests = models.PositiveIntegerField(default=0)
     tools = models.PositiveIntegerField(default=0)
+    # 轮开始时先建占位记录（False），结束时回填后置 True；老数据都是完成的。平均值只算完成的轮
+    finished = models.BooleanField(default=True)
