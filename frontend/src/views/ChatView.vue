@@ -1,6 +1,6 @@
 <script setup>
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { NButton, NIcon, NInput, NSelect, NTabPane, NTabs } from 'naive-ui'
+import { NButton, NIcon, NInput, NTabPane, NTabs } from 'naive-ui'
 import {
   AddCircleOutline,
   ChatbubbleEllipsesOutline,
@@ -137,7 +137,6 @@ async function selectSession(id) {
 }
 
 // 会话下拉框的选项
-const sessionOptions = computed(() => sessions.value.map((s) => ({ label: s.title || '新会话', value: s.id })))
 
 const currentSession = computed(() => sessions.value.find((s) => s.id === currentId.value))
 
@@ -358,21 +357,13 @@ onBeforeUnmount(() => closeStream && closeStream())
     </div>
 
     <main class="main">
-      <!-- 标签行：选择会话、切换到工作区 -->
+      <!-- 标签行：切换 会话 / 工作区 / 预览 -->
       <div class="tabs">
         <n-tabs v-model:value="tab" class="tab-switch">
           <n-tab-pane name="chat" display-directive="show"><template #tab><span class="tab-label"><n-icon><ChatbubbleEllipsesOutline /></n-icon>会话</span></template></n-tab-pane>
           <n-tab-pane name="workspace" display-directive="show"><template #tab><span class="tab-label"><n-icon><FolderOpenOutline /></n-icon>工作区</span></template></n-tab-pane>
           <n-tab-pane name="preview" display-directive="show"><template #tab><span class="tab-label"><n-icon><GlobeOutline /></n-icon>预览</span></template></n-tab-pane>
         </n-tabs>
-        <n-select
-          :value="currentId"
-          size="small"
-          class="session-select"
-          placeholder="选择会话"
-          :options="sessionOptions"
-          @update:value="selectSession"
-        />
       </div>
 
       <PreviewPane ref="previewPane" v-show="tab === 'preview'" :links="previewLinks" />
@@ -735,20 +726,10 @@ onBeforeUnmount(() => closeStream && closeStream())
 /* 只用标签头切换，内容区由下面各自的 v-show 控制；tab-pane 本身没有内容，所以去掉它占的空间 */
 .tab-switch :deep(.n-tabs-pane-wrapper),
 .tab-switch :deep(.n-tab-pane) {
-  display: none !important; /* 空的 pane 自带 12px 顶部内边距，会把标签顶偏，和右边的下拉框对不齐 */
+  display: none !important; /* 空的 pane 自带 12px 顶部内边距，会把标签顶偏 */
 }
 .tab-switch :deep(.n-tabs-nav) {
   border-bottom: none;
-}
-/* n-tabs 自带 width:100%，会和下拉框按比例一起收缩而重叠；改成按内容定宽、不收缩，由下拉框单独缩小 */
-.tab-switch {
-  flex: none;
-  width: auto;
-}
-.session-select {
-  flex: 0 1 200px;
-  width: auto;
-  min-width: 0;
 }
 .messages-wrap {
   position: relative; /* 流星雨绝对定位在它里面 */
@@ -992,10 +973,6 @@ onBeforeUnmount(() => closeStream && closeStream())
   .tab-switch {
     flex: 1;
     min-width: 0;
-  }
-  .session-select {
-    width: 52px;
-    flex-shrink: 0;
   }
   /* 标签之间的间距（默认 36px，是组件内联的变量，覆盖不了）收小：改垫片宽度，360px 宽的手机上三个标签才放得下 */
   .tab-switch :deep(.n-tabs-tab-pad) {
